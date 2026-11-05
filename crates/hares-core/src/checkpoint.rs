@@ -1188,7 +1188,7 @@ mod tests {
         .expect("evaluator");
         for i in 0..30u32 {
             let step_end = start + chrono::Duration::hours(i as i64 + 1);
-            evaluator.step(2.5, 0.0, 3600.0, step_end);
+            evaluator.step(2.5, 0.0, 3600.0, step_end).expect("the step folds");
         }
         let blob = evaluator
             .snapshot_state()

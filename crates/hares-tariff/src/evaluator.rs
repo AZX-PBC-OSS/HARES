@@ -324,7 +324,7 @@ impl TariffEvaluator {
             interval_seconds,
             max_lookback_months,
             period_name_table.len(),
-        );
+        )?;
 
         debug_assert_eq!(price_array.len(), export_array.len());
         debug_assert_eq!(price_array.len(), ev_price_array.len());
@@ -449,9 +449,9 @@ impl TariffEvaluator {
         ev_power_w: f64,
         dt_seconds: f64,
         current_time: DateTime<Tz>,
-    ) -> Option<BillingPeriodSummary> {
+    ) -> Result<Option<BillingPeriodSummary>, HaresError> {
         if self.finished {
-            return None;
+            return Ok(None);
         }
         debug_assert!(
             self.step_index < self.price_array.len(),
@@ -610,7 +610,7 @@ impl TariffEvaluator {
                 step_end = %current_time,
                 "billing period closes: the step end reached the period end"
             );
-            Some(self.close_period(self.billing_state.period_end))
+            Some(self.close_period(self.billing_state.period_end)?)
         } else {
             None
         };
@@ -618,7 +618,7 @@ impl TariffEvaluator {
         if !self.advance() {
             self.finished = true;
         }
-        result
+        Ok(result)
     }
 
     /// Closes the open billing period at `close_time` and reopens the next
@@ -632,7 +632,7 @@ impl TariffEvaluator {
     /// A period opened at its own boundary multiplies nothing, so runs that
     /// never attach or replace a tariff close periods exactly as this
     /// proration never touches them.
-    fn close_period(&mut self, close_time: DateTime<Tz>) -> BillingPeriodSummary {
+    fn close_period(&mut self, close_time: DateTime<Tz>) -> Result<BillingPeriodSummary, HaresError> {
         let period_start = self.billing_state.period_start;
         let period_end = self.billing_state.period_end;
         let month = period_start.month() as u8;
@@ -684,8 +684,8 @@ impl TariffEvaluator {
             },
         );
 
-        self.billing_state.reset(period_end);
-        summary
+        self.billing_state.reset(period_end)?;
+        Ok(summary)
     }
 
     /// Re-anchors the open billing period to the one containing
@@ -705,9 +705,13 @@ impl TariffEvaluator {
     /// close fires on the fold whose end reaches the boundary, before the
     /// boundary step's own fold. Both routes agree; every kWh is billed
     /// exactly once.
-    pub fn activate_at(&mut self, attach_time: DateTime<Tz>) {
+    ///
+    /// # Errors
+    ///
+    /// A period boundary the zone cannot resolve.
+    pub fn activate_at(&mut self, attach_time: DateTime<Tz>) -> Result<(), HaresError> {
         let cycle = self.tariff.billing_cycle;
-        let period_start = containing_period_start(self.simulation_start, attach_time, cycle);
+        let period_start = containing_period_start(self.simulation_start, attach_time, cycle)?;
         self.billing_state = BillingState::new(
             period_start,
             cycle,
@@ -715,13 +719,14 @@ impl TariffEvaluator {
             self.interval_seconds,
             self.max_ratchet_lookback(),
             self.period_name_table.len(),
-        );
+        )?;
         // The containing period's start sits on the walk's anchored chain,
         // whose anchor is the simulation start's day: a clamped boundary
         // on that chain (a February end among them) must not re-anchor the
         // state to the clamped start's day.
         self.billing_state.anchor_day = self.simulation_start.day();
         self.billing_state.active_since = attach_time;
+        Ok(())
     }
 
     /// Closes the open billing period ahead of a tariff replacement at
@@ -734,11 +739,28 @@ impl TariffEvaluator {
     /// step has been folded into the open period (a period holding nothing
     /// billable closes nothing; the boundary close that opened it already
     /// billed through the boundary).
-    pub fn close_open_period(&mut self, at: DateTime<Tz>) -> Option<BillingPeriodSummary> {
+    /// Closes the open billing period ahead of a tariff replacement at
+    /// `at`, returning the outgoing period's summary: the bill exists, with
+    /// the outgoing tariff's accruals and its fixed and demand charges
+    /// prorated to the span it served.
+    ///
+    /// Returns `None` when the evaluator has already finalized (its open
+    /// period closed then, and a second close would double-bill) or when no
+    /// step has been folded into the open period (a period holding nothing
+    /// billable closes nothing; the boundary close that opened it already
+    /// billed through the boundary).
+    ///
+    /// # Errors
+    ///
+    /// A period boundary the zone cannot resolve.
+    pub fn close_open_period(
+        &mut self,
+        at: DateTime<Tz>,
+    ) -> Result<Option<BillingPeriodSummary>, HaresError> {
         if self.finalized || self.billing_state.steps_in_period == 0 {
-            return None;
+            return Ok(None);
         }
-        Some(self.close_period(at))
+        Ok(Some(self.close_period(at)?))
     }
 
     /// The largest ratchet lookback any demand rate declares, for
@@ -1391,7 +1413,10 @@ mod tests {
         let mut summaries = Vec::new();
         for i in 0..total {
             let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            if let Some(s) = ev.step(power_fn(i), 0.0, interval as f64, step_end) {
+            if let Some(s) = ev
+                .step(power_fn(i), 0.0, interval as f64, step_end)
+                .expect("the step folds")
+            {
                 summaries.push(s);
             }
         }
@@ -1865,7 +1890,7 @@ mod tests {
 
         // Accumulate some load so finalize() has something to return.
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(5.0, 0.0, interval as f64, step_end);
+        ev.step(5.0, 0.0, interval as f64, step_end).expect("the step folds");
 
         let first = ev.finalize(end);
         assert!(first.is_some(), "first finalize() should return Some");
@@ -1895,7 +1920,7 @@ mod tests {
         let steps_15d = 15 * 24;
         for i in 0..steps_15d {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1000.0, 0.0, interval as f64, t);
+            ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
         }
 
         let summary = ev.finalize(sim_end).expect("should have charges");
@@ -1928,7 +1953,7 @@ mod tests {
         let total = ev.total_steps();
         for i in 0..(total - 1) {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1000.0, 0.0, interval as f64, t);
+            ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
         }
 
         let summary = ev.finalize(end).expect("should have charges");
@@ -1953,10 +1978,12 @@ mod tests {
 
         // The single valid step.
         let step_end = start + Duration::seconds(interval as i64);
-        let _ = ev.step(1000.0, 0.0, interval as f64, step_end);
+        let _ = ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
 
         // Any subsequent call must return None -- the evaluator is finished.
-        let result = ev.step(1000.0, 0.0, interval as f64, step_end + Duration::hours(1));
+        let result = ev
+            .step(1000.0, 0.0, interval as f64, step_end + Duration::hours(1))
+            .expect("the step folds");
         assert!(
             result.is_none(),
             "step() after simulation end should return None"
@@ -2000,7 +2027,7 @@ mod tests {
 
         // Run the single step to completion.
         let step_end = start + Duration::seconds(interval as i64);
-        let _ = ev.step(1000.0, 0.0, interval as f64, step_end);
+        let _ = ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
         assert!(ev.is_finished());
 
         // Accessors must not panic even after step() has finished.
@@ -2030,12 +2057,12 @@ mod tests {
         // Push 6 steps of 10 kW (30 min at 5-min intervals).
         for i in 0..6 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(10_000.0, 0.0, interval as f64, t);
+            ev.step(10_000.0, 0.0, interval as f64, t).expect("the step folds");
         }
         // Then push low load.
         for i in 6..12 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1000.0, 0.0, interval as f64, t);
+            ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
         }
 
         // The peak should be ~10 kW (the 30-min average of the first 6 steps).
@@ -2067,7 +2094,7 @@ mod tests {
         // Push 3 steps of 10 kW (15 min at 5-min intervals).
         for i in 0..3 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(10.0, 0.0, interval as f64, t);
+            ev.step(10.0, 0.0, interval as f64, t).expect("the step folds");
         }
         let peak = ev.billing_state().peak_demand_w();
         assert!(
@@ -2103,7 +2130,7 @@ mod tests {
 
         // Step with zero load -- no energy, no demand.
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(0.0, 0.0, interval as f64, step_end);
+        ev.step(0.0, 0.0, interval as f64, step_end).expect("the step folds");
 
         let summary = ev
             .finalize(end)
@@ -2122,7 +2149,7 @@ mod tests {
         let interval = 3600u32;
         let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(1000.0, 0.0, interval as f64, step_end);
+        ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
 
         assert!(!ev.is_finished());
         let _ = ev.finalize(end);
@@ -2291,13 +2318,16 @@ mod tests {
 
         // Activate at Jan 17 00:00: the containing period is [Jan 1, Feb 1).
         let attach = make_start(2025, 1, 17);
-        ev.activate_at(attach);
+        ev.activate_at(attach).expect("the attach resolves");
 
         let total = ev.total_steps();
         let mut summaries = Vec::new();
         for i in 0..total {
             let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            if let Some(s) = ev.step(1000.0, 0.0, interval as f64, step_end) {
+            if let Some(s) = ev
+                .step(1000.0, 0.0, interval as f64, step_end)
+                .expect("the step folds")
+            {
                 summaries.push(s);
             }
         }
@@ -2356,20 +2386,25 @@ mod tests {
         let january_hours = 31 * 24;
         for i in 0..total {
             let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            let (a, b) = (from_start.step(2.0, 0.0, interval as f64, step_end), {
+            let (a, b) = (
+                from_start
+                    .step(2.0, 0.0, interval as f64, step_end)
+                    .expect("the step folds"),
                 if i >= january_hours {
-                    attached.step(2.0, 0.0, interval as f64, step_end)
+                    attached
+                        .step(2.0, 0.0, interval as f64, step_end)
+                        .expect("the step folds")
                 } else {
                     None
-                }
-            });
+                },
+            );
             if i + 1 < january_hours {
                 assert!(a.is_none() && b.is_none());
             } else if i + 1 == january_hours {
                 // The from-start run closes January with full charges; the
                 // attached run has stepped nothing yet.
                 assert!(a.is_some() && b.is_none());
-                attached.activate_at(step_end);
+                attached.activate_at(step_end).expect("the attach resolves");
             } else {
                 assert_eq!(a.is_some(), b.is_some());
                 if let (Some(a), Some(b)) = (a, b) {
@@ -2400,10 +2435,13 @@ mod tests {
         // Ten days of load, then the switch mid-period.
         for i in 0..240 {
             let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(2000.0, 0.0, interval as f64, step_end);
+            ev.step(2000.0, 0.0, interval as f64, step_end).expect("the step folds");
         }
         let switch = start + Duration::seconds(240 * 3600);
-        let bill = ev.close_open_period(switch).expect("the bill exists");
+        let bill = ev
+            .close_open_period(switch)
+            .expect("the close resolves")
+            .expect("the bill exists");
 
         assert_eq!(bill.period_start, make_start(2025, 1, 1));
         assert_eq!(bill.period_end, switch);
@@ -2415,7 +2453,7 @@ mod tests {
         assert_eq!(bill.fixed_charge_usd.to_bits(), expected_fixed.to_bits());
 
         // The second close returns nothing: the period closed.
-        assert!(ev.close_open_period(switch).is_none());
+        assert!(ev.close_open_period(switch).expect("the close resolves").is_none());
     }
 
     // A period that folded no step holds nothing billable: closing it
@@ -2427,7 +2465,7 @@ mod tests {
         let interval = 3600u32;
         let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
         let switch = start + Duration::seconds(48 * 3600);
-        assert!(ev.close_open_period(switch).is_none());
+        assert!(ev.close_open_period(switch).expect("the close resolves").is_none());
     }
 
     // A finalize of a period the tariff joined mid-way bills the same fixed
@@ -2460,23 +2498,26 @@ mod tests {
         // The finalizing run: the tariff attached mid-period, folded to
         // sim_end, finalized there.
         let mut finalizing = make_evaluator(tariff.clone(), start, end, interval);
-        finalizing.activate_at(attach);
+        finalizing.activate_at(attach).expect("the attach resolves");
         for i in 0..hours {
             let t = attach + Duration::seconds((i as i64 + 1) * interval as i64);
-            finalizing.step(2.0, 0.0, interval as f64, t);
+            finalizing.step(2.0, 0.0, interval as f64, t).expect("the step folds");
         }
         let finalized = finalizing.finalize(sim_end).expect("the finalize bills");
 
         // The replacing run: the same attached state, closed by a
         // replacement at sim_end instead of finalized.
         let mut replacing = make_evaluator(tariff, start, end, interval);
-        replacing.activate_at(attach);
+        replacing.activate_at(attach).expect("the attach resolves");
         for i in 0..hours {
             let t = attach + Duration::seconds((i as i64 + 1) * interval as i64);
-            replacing.step(2.0, 0.0, interval as f64, t);
+            replacing
+                .step(2.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
         let closed = replacing
             .close_open_period(sim_end)
+            .expect("the close resolves")
             .expect("the replacement close bills");
 
         assert_eq!(finalized.period_end, closed.period_end);
@@ -2529,7 +2570,7 @@ mod tests {
         let hours = (sim_end - start).num_hours() as usize;
         for i in 0..hours {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(2000.0, 0.0, interval as f64, t);
+            ev.step(2000.0, 0.0, interval as f64, t).expect("the step folds");
         }
         let finalized = ev.finalize(sim_end).expect("the finalize bills");
 
@@ -2672,7 +2713,7 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 1, 1, 6, 0, 0).unwrap();
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
-        ev.step(1000.0, 0.0, 3600.0, step_end);
+        ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
 
         // The energy cost should be 1 kWh * $1.50 = $1.50
         let summary = ev.finalize(step_end).expect("should return summary");
@@ -2694,7 +2735,7 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 1, 1, 5, 0, 0).unwrap();
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
-        ev.step(1000.0, 0.0, 3600.0, step_end);
+        ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
 
         let summary = ev.finalize(step_end).expect("should return summary");
         assert!(
@@ -2721,7 +2762,7 @@ mod tests {
 
         for i in 0..12 {
             let step_end = start + Duration::seconds((i as i64 + 1) * 3600);
-            ev.step(1000.0, 0.0, 3600.0, step_end);
+            ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
         }
 
         let summary = ev.finalize(end).expect("should return summary");
@@ -2809,7 +2850,7 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
-        ev.step(5000.0, 2000.0, 3600.0, step_end);
+        ev.step(5000.0, 2000.0, 3600.0, step_end).expect("the step folds");
 
         let summary = ev.finalize(step_end).expect("should return summary");
         // 3 kWh house @ $0.30 = $0.90, 2 kWh EV @ $0.06 = $0.12
@@ -2843,7 +2884,7 @@ mod tests {
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
         // 5 kW house load, 0 kW EV
-        ev.step(5000.0, 0.0, 3600.0, step_end);
+        ev.step(5000.0, 0.0, 3600.0, step_end).expect("the step folds");
 
         let summary = ev.finalize(step_end).expect("should return summary");
         // 5 kWh @ $0.30 = $1.50
@@ -3396,7 +3437,7 @@ mod tests {
         let jul = New_York.with_ymd_and_hms(2025, 7, 15, 12, 0, 0).unwrap();
         let mut ev =
             TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
-        ev.step(1000.0, 0.0, 3600.0, jul);
+        ev.step(1000.0, 0.0, 3600.0, jul).expect("the step folds");
         let summary = ev.finalize(jul + Duration::hours(1)).unwrap();
         assert!((summary.energy_charge_usd - 0.30).abs() < 0.01);
 
@@ -3404,7 +3445,7 @@ mod tests {
         let apr = New_York.with_ymd_and_hms(2025, 4, 15, 12, 0, 0).unwrap();
         let mut ev =
             TariffEvaluator::new(tariff.clone(), apr, apr + Duration::hours(1), 3600).unwrap();
-        ev.step(1000.0, 0.0, 3600.0, apr);
+        ev.step(1000.0, 0.0, 3600.0, apr).expect("the step folds");
         let summary = ev.finalize(apr + Duration::hours(1)).unwrap();
         assert!((summary.energy_charge_usd - 0.20).abs() < 0.01);
 
@@ -3412,8 +3453,151 @@ mod tests {
         let dec = New_York.with_ymd_and_hms(2025, 12, 15, 12, 0, 0).unwrap();
         let mut ev =
             TariffEvaluator::new(tariff.clone(), dec, dec + Duration::hours(1), 3600).unwrap();
-        ev.step(1000.0, 0.0, 3600.0, dec);
+        ev.step(1000.0, 0.0, 3600.0, dec).expect("the step folds");
         let summary = ev.finalize(dec + Duration::hours(1)).unwrap();
         assert!((summary.energy_charge_usd - 0.10).abs() < 0.01);
+    }
+
+    // A tariff whose cycle opens in a zone that skips local midnight
+    // constructs: America/Santiago moves 00:00 to 01:00 on the first
+    // Sunday of September (2025: the 7th), and an August 7 start's first
+    // period ends on that skipped midnight.
+    #[test]
+    fn evaluator_constructs_in_a_zone_that_skips_local_midnight() {
+        let start = chrono_tz::America::Santiago
+            .with_ymd_and_hms(2025, 8, 7, 0, 0, 0)
+            .unwrap();
+        let end = chrono_tz::America::Santiago
+            .with_ymd_and_hms(2025, 9, 10, 0, 0, 0)
+            .unwrap();
+        let ev = TariffEvaluator::new(flat_tariff(0.15), start, end, 3600)
+            .expect("a zone that skips local midnight constructs");
+        assert_eq!(
+            ev.billing_state().period_end,
+            chrono_tz::America::Santiago
+                .with_ymd_and_hms(2025, 9, 7, 1, 0, 0)
+                .unwrap()
+        );
+    }
+
+    // A custom 90-day cycle from May 15 spans the June season boundary:
+    // May 15-31 (17 days, winter) and June 1 - August 12 (73 days,
+    // summer under the default June-September split). A constant 1 kW
+    // load bills 2160 kWh over the period, 408 kWh winter and 1752 kWh
+    // summer; each month's own tier block and demand season applies to
+    // the days it covers, not the start month's to the whole span.
+    //
+    // Hand-computed: the winter block [500 kWh] @ [0.05, 0.08] bills
+    // 408 × 0.05 = $20.40; the summer block [500 kWh] @ [0.10, 0.20]
+    // bills 500 × 0.10 + 1252 × 0.20 = $300.40; total $320.80. The
+    // summer-only demand rate ($10/kW on the period's 1 kW peak) covers
+    // 73 of the period's 90 days: 1 kW × 10 × 73/90 = $8.1111. Billed at
+    // the start month alone the energy is $157.80 and the demand $0.
+    #[test]
+    fn custom_cycle_spanning_a_season_bills_each_month_at_its_own_season() {
+        let tariff = ElectricTariff {
+            name: Some("quarterly-split".into()),
+            tou_schedule: vec![TouPeriod {
+                name: "flat".into(),
+                schedule: vec![TimeWindow::new(DayFilter::Any, 0, 1440, 0.0)],
+                season: SeasonFilter::All,
+            }],
+            energy_rates: vec![EnergyRate {
+                period_name: "flat".into(),
+                season: SeasonFilter::All,
+                rate_per_kwh: 0.10,
+            }],
+            tiered_rates: vec![
+                TieredBlock {
+                    season: SeasonFilter::Summer,
+                    thresholds_kwh: vec![500.0],
+                    rates_per_kwh: vec![0.10, 0.20],
+                },
+                TieredBlock {
+                    season: SeasonFilter::Winter,
+                    thresholds_kwh: vec![500.0],
+                    rates_per_kwh: vec![0.05, 0.08],
+                },
+            ],
+            demand_rates: vec![crate::types::DemandRate {
+                period_name: None,
+                season: SeasonFilter::Summer,
+                rate_per_kw: 10.0,
+                ratchet: None,
+            }],
+            billing_cycle: BillingCycle::Custom(90),
+            ..Default::default()
+        };
+        let start = New_York.with_ymd_and_hms(2025, 5, 15, 0, 0, 0).unwrap();
+        let end = start + Duration::days(90);
+        let mut ev = make_evaluator(tariff, start, end, 3600);
+
+        // 90 days of constant 1 kW hourly steps; the last step's end
+        // reaches the boundary and folds the period's summary.
+        let mut summary = None;
+        for i in 0..2160i64 {
+            let step_end = start + Duration::hours(i + 1);
+            if let Some(s) = ev
+                .step(1000.0, 0.0, 3600.0, step_end)
+                .expect("the step folds")
+            {
+                summary = Some(s);
+            }
+        }
+        let summary = summary.expect("the boundary step folds the period's summary");
+
+        let expected_energy = 408.0 * 0.05 + (500.0 * 0.10 + 1252.0 * 0.20);
+        assert!(
+            (summary.energy_charge_usd - expected_energy).abs() < 1e-6,
+            "each month's tier block bills its own days: expected \
+             {expected_energy}, got {}",
+            summary.energy_charge_usd
+        );
+        let expected_demand = 1.0_f64 * 10.0 * (73.0 / 90.0);
+        assert!(
+            (summary.demand_charge_usd - expected_demand).abs() < 1e-6,
+            "the summer demand rate covers the summer days' share of the \
+             period: expected {expected_demand}, got {}",
+            summary.demand_charge_usd
+        );
+    }
+
+    // A demand rate whose period name the evaluator's own table lacks is
+    // a typed error naming the rate, not an expect panic on the lookup.
+    #[test]
+    fn the_demand_charge_names_a_foreign_period_rate_instead_of_panicking() {
+        let mut tariff = flat_tariff(0.15);
+        tariff.demand_rates = vec![crate::types::DemandRate {
+            period_name: Some("coincident".into()),
+            season: SeasonFilter::All,
+            rate_per_kw: 5.0,
+            ratchet: None,
+        }];
+        let start = New_York.with_ymd_and_hms(2025, 7, 7, 0, 0, 0).unwrap();
+        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        // The construction path interns every declared rate's name; a
+        // name that is not in the table must be reported, whatever
+        // future construction paths do.
+        ev.tariff.demand_rates[0].period_name = Some("not-interned".into());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ev.compute_demand_charge(7)
+        }));
+        let reported = match outcome {
+            Ok(reported) => reported,
+            Err(payload) => panic!(
+                "the demand-charge resolver panicked on a foreign period name: {}",
+                payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("?")
+            ),
+        };
+        let message = format!("{reported:?}");
+        assert!(
+            message.contains("not-interned"),
+            "the demand-charge resolver must report the foreign rate as a \
+             typed error naming it, got: {message}"
+        );
     }
 }
