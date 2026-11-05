@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, FixedOffset};
-use hares_types::{HaresError, ZoneId};
+use hares_types::{EquipmentId, HaresError, ZoneId};
 
 use crate::observation::{ObservationPlan, ObservationSurface, telemetry_observe_into};
 
@@ -167,7 +167,15 @@ impl DwellingTelemetry {
                 .iter()
                 .map(|name| (name.clone(), ZoneId(0)))
                 .collect(),
-            equipment_names: self.equipment_names.clone(),
+            // The ids play no part in the snapshot executor (the vectors
+            // are in dwelling order and frozen at capture), so the plan's
+            // equipment bindings carry a placeholder here, the zone ids'
+            // own precedent above.
+            equipment: self
+                .equipment_names
+                .iter()
+                .map(|name| (name.clone(), EquipmentId(0)))
+                .collect(),
             actors: self
                 .actor_telemetry
                 .iter()
@@ -315,6 +323,39 @@ mod tests {
         let t = sample();
         let err = t.to_observation_vec(&["outdoor_rh"]).unwrap_err();
         assert!(err.to_string().contains("unknown telemetry field"));
+    }
+
+    /// A 1 kW load publishes 1000 W: the type's own unit is watts, and
+    /// the plan's `equipment_power[...]` column reads the field as is
+    /// (no /1000 anywhere between the producer and the observation).
+    #[test]
+    fn one_kw_load_publishes_1000_w_through_the_plan() {
+        use hares_types::ElectricPower;
+
+        // The type level: the constructor's unit is W, so the 1 kW load's
+        // net consumption is 1000.0.
+        let load = ElectricPower::consumption(1000.0).expect("a 1 kW load");
+        assert_eq!(load.net_consumption_w(), 1000.0);
+
+        // The plan level: the telemetry snapshot's equipment power field
+        // is the same W the producer sent, read through the plan's
+        // `equipment_power[...]` on bits.
+        let mut t = sample();
+        t.equipment_power_w = vec![1000.0];
+        let mut warned = ObservationWarnOnce::default();
+        let plan = crate::observation::ObservationPlan::from_telemetry(
+            &t,
+            &["equipment_power[Battery]"],
+            &mut warned,
+        )
+        .expect("the equipment field resolves");
+        let mut out = vec![0.0_f64; 1];
+        crate::observation::telemetry_observe_into(&t, &plan, &mut out).expect("the read succeeds");
+        assert_eq!(
+            out[0].to_bits(),
+            1000.0_f64.to_bits(),
+            "equipment_power[Battery] publishes the 1 kW load as 1000 W, on bits"
+        );
     }
 
     #[test]

@@ -97,7 +97,10 @@ fn resstock_fleet_folds_hourly() {
         aggregate.num_columns() > 1,
         "the product columns exist: the homes' tier 0 variables folded"
     );
-    // The homes table: one row per home, the fleet's own columns.
+    // The homes table: one row per home, the fleet's own columns. No home
+    // requested metrics, so the metrics' columns carry none; the homes
+    // ran, so each carries its run health and the health's typed counter
+    // columns ride with it.
     let homes = result.homes_table();
     assert_eq!(homes.num_rows(), 3);
     let names: Vec<String> = homes
@@ -115,7 +118,16 @@ fn resstock_fleet_folds_hourly() {
             "reason",
             "steps",
             "periods_folded",
+            "health_port_rollbacks",
+            "health_rejected_control_signals",
+            "health_clamped_actions",
+            "health_curve_index_clamps",
+            "health_fluid_payload_absences",
+            "health_evicted_actors",
+            "health_cross_tier_deadband_events",
+            "health_ideal_capacity_unsolved_steps",
+            "health_discarded_state_energy_wh",
         ],
-        "no home requested metrics, so the homes table carries none"
+        "no home requested metrics, so the homes table carries none of those"
     );
 }

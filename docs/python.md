@@ -246,11 +246,18 @@ name; a unit that names none fails when the dwelling is built.
 
 The `hares.rl` package wraps the engine in Gymnasium environments
 (`DwellingGymEnv` for one dwelling, `VecDwellingGymEnv` for a fleet stepped
-through the extension's `batch_step`). Both paths clamp every action value
+through the extension's `batch_step`; the vector class is a
+`gymnasium.vector.VectorEnv`, the per-env spaces on
+`single_observation_space`/`single_action_space`, so the standard vector
+wrappers compose). Both paths clamp every action value
 to the declared bounds of its column before the value reaches the dwelling,
 and the clamped values are counted on the acting dwelling's run health in
 every build; the count is exposed with the run's `RunResult`, alongside the
-other run-total counters. An episode's truncating step finalises the run
+other run-total counters. The reward contract is one default on both
+environments: `reward_fn=None` pays minus the step's net electric power in
+**kW**, converted once from the step dict's `net_electric_power_w` in **W**
+(a 1 kW step pays -1.0), and a custom `reward_fn` reads the same context's
+watts and owns its own scale. An episode's truncating step finalises the run
 through `finish()`; the finished `RunResult` is the wrapper's `run_result`
 (one dwelling) or `run_results` (the vector), and the underlying dwellings
 are reachable (`env.dwelling`, `envs`), so `health()` reads at any step.

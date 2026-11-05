@@ -152,6 +152,64 @@ impl Default for RunHealth {
     }
 }
 
+impl RunHealth {
+    /// The run's degradation events, one per nonzero counter plus an
+    /// unconverged warm-up, in declaration order: the one enumeration a
+    /// status classifier or a report fold consumes. The destructure names
+    /// every field (no rest pattern), so a counter added to `RunHealth`
+    /// fails to compile here and this enumeration must grow with it; a
+    /// consumer cannot silently forget a new counter. Each event names its
+    /// counter and its count ("`clamped_actions: 3`"); a zeroed
+    /// `RunHealth` with a converged or disabled warm-up enumerates
+    /// nothing.
+    pub fn degradation_events(&self) -> Vec<String> {
+        let RunHealth {
+            port_rollbacks,
+            rejected_control_signals,
+            clamped_actions,
+            curve_index_clamps,
+            fluid_payload_absences,
+            evicted_actors,
+            cross_tier_deadband_events,
+            ideal_capacity_unsolved_steps,
+            discarded_state_energy_wh,
+            warmup,
+            // The closure report is not a degradation counter (its
+            // residuals are reported in their own surface).
+            energy_closure: _,
+        } = self;
+        let mut events: Vec<String> = Vec::new();
+        let mut push_count = |name: &'static str, count: u64| {
+            if count > 0 {
+                events.push(format!("{name}: {count}"));
+            }
+        };
+        push_count("port_rollbacks", *port_rollbacks);
+        push_count("rejected_control_signals", *rejected_control_signals);
+        push_count("clamped_actions", *clamped_actions);
+        push_count("curve_index_clamps", *curve_index_clamps);
+        push_count("fluid_payload_absences", *fluid_payload_absences);
+        push_count("evicted_actors", *evicted_actors);
+        push_count("cross_tier_deadband_events", *cross_tier_deadband_events);
+        push_count(
+            "ideal_capacity_unsolved_steps",
+            *ideal_capacity_unsolved_steps,
+        );
+        if *discarded_state_energy_wh != 0.0 {
+            events.push(format!(
+                "discarded_state_energy_wh: {discarded_state_energy_wh}"
+            ));
+        }
+        if let WarmupOutcome::Ran {
+            converged: false, ..
+        } = warmup
+        {
+            events.push("the warm-up did not converge".to_string());
+        }
+        events
+    }
+}
+
 /// One registered actor's run-total scheduler-entry time, behind the
 /// `profiling` feature: `total` is the actor's share of the run's `actors`
 /// phase (the interest filter, `decide()` and the health check, measured by

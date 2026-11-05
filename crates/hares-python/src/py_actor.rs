@@ -38,15 +38,15 @@ use std::sync::Arc;
 use hares_control::{DispatchRequest, DispatchTarget, PriorityTier};
 use hares_types::{
     AcrossHomes, Aggregation, ControlSignal, DutyCycleComponent, EnumLabels, EnvironmentState,
-    EvConnectionState, OperatingMode, ProtocolId, Sampling, Telemetry, TelemetryField, Unit,
-    VariableKind,
+    EvConnectionState, HaresError, OperatingMode, ProtocolId, Sampling, Telemetry, TelemetryField,
+    Unit, VariableKind,
 };
 
 use crate::py_enums::{
     PyDutyCycleComponent, PyEvConnectionState, PyIdealCapacityMode, PyInverterPriority,
 };
 use crate::utils::{validate_finite, validate_thermal_setpoint_band};
-use pyo3::exceptions::{PyKeyError, PyValueError};
+use pyo3::exceptions::{PyKeyError, PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
@@ -109,6 +109,38 @@ impl PyActor {
             )));
         }
         Ok(())
+    }
+
+    /// The actor's mutable decision state, serialized for the checkpoint.
+    /// The default actor carries none and returns empty bytes; a stateful
+    /// actor overrides this to return its state (any `bytes`), and must
+    /// override `load_state` with the matching read. The episode's reset
+    /// restores the construction snapshot through the same hook, so the
+    /// saved state is also the episode's starting state.
+    fn save_state(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Restores what this actor's `save_state` serialized. The default
+    /// accepts only an empty blob (the no-state contract): a non-empty one
+    /// means the actor saved state it cannot restore, and is refused
+    /// instead of silently dropping it.
+    fn load_state(&mut self, state: &[u8]) -> PyResult<()> {
+        if state.is_empty() {
+            return Ok(());
+        }
+        Err(PyNotImplementedError::new_err(
+            "this actor's checkpoint carries non-empty state but it does not \
+             implement load_state(state): a stateful actor must override both \
+             save_state() and load_state(state)",
+        ))
+    }
+
+    /// The schema version of the blob `save_state` returns; bump whenever
+    /// the serialized shape changes. The checkpoint records it beside the
+    /// blob and refuses a restore across versions.
+    fn checkpoint_version(&self) -> u32 {
+        1
     }
 }
 
@@ -380,6 +412,10 @@ pub struct PyActorWrapper {
     /// The actor's typed declarations, read once from the Python actor's
     /// `output_variables()`.
     declared: Vec<TelemetryField>,
+    /// The schema version of the actor's saved state, read once from the
+    /// Python actor's `checkpoint_version()` beside the declarations: a
+    /// version the Python actor fails to report refuses the registration.
+    checkpoint_version: u32,
     /// The sealed telemetry map the declarations build
     /// (`Telemetry::from_fields`): exactly the declared keys are registered,
     /// and every later undeclared write latches.
@@ -398,6 +434,16 @@ impl PyActorWrapper {
             .and_then(|n| n.extract::<String>())
             .unwrap_or_else(|_| "PyActor".to_string());
         let declared = Self::read_declarations(py, &obj)?;
+        let checkpoint_version = obj
+            .bind(py)
+            .call_method0("checkpoint_version")
+            .and_then(|version| version.extract::<u32>())
+            .map_err(|e| {
+                PyValueError::new_err(format!(
+                    "the Python actor '{name}' must report an integer \
+                     checkpoint_version(): {e}"
+                ))
+            })?;
         let telemetry = Telemetry::from_fields(&declared);
         {
             let mut actor = obj.bind(py).borrow_mut();
@@ -411,6 +457,7 @@ impl PyActorWrapper {
             name: Arc::from(name),
             obj,
             declared,
+            checkpoint_version,
             telemetry,
             last_error: None,
         })
@@ -449,6 +496,51 @@ impl hares_core::Actor for PyActorWrapper {
 
     fn health_detail(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// The Python actor's serialized decision state: its own
+    /// `save_state()` bytes. A Python error refuses the checkpoint naming
+    /// the actor, so a state the actor cannot serialize never silently
+    /// leaves the checkpoint.
+    fn save_state(&self) -> Result<Vec<u8>, HaresError> {
+        Python::attach(|py| {
+            self.obj
+                .bind(py)
+                .call_method0("save_state")
+                .and_then(|state| state.extract::<Vec<u8>>())
+                .map_err(|e| {
+                    HaresError::Io(format!(
+                        "Python actor '{}': save_state failed: {e}",
+                        self.name
+                    ))
+                })
+        })
+    }
+
+    /// Restores the Python actor's decision state through its own
+    /// `load_state(state)`. A Python error refuses the restore naming the
+    /// actor; the checkpoint's empty-blob and version gates ran already.
+    fn load_state(&mut self, data: &[u8]) -> Result<(), HaresError> {
+        Python::attach(|py| {
+            let bytes = pyo3::types::PyBytes::new(py, data);
+            self.obj
+                .bind(py)
+                .call_method1("load_state", (&bytes,))
+                .map_err(|e| {
+                    HaresError::Io(format!(
+                        "Python actor '{}': load_state failed: {e}",
+                        self.name
+                    ))
+                })?;
+            Ok(())
+        })
+    }
+
+    /// The schema version read once at registration (beside the actor's
+    /// declared output variables); the checkpoint records it beside every
+    /// blob this actor saves.
+    fn checkpoint_version(&self) -> u32 {
+        self.checkpoint_version
     }
 
     fn decide(&mut self, env: &EnvironmentState, out: &mut Vec<DispatchRequest>) {

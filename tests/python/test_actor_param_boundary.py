@@ -178,3 +178,27 @@ def test_a_preconditioning_event_its_unit_cannot_serve_is_a_config_error() -> No
             },
         )
     assert dwelling.actor_count() == before
+
+
+def test_unknown_param_is_refused_naming_the_schema() -> None:
+    """A typo'd parameter is refused naming the key and the actor type:
+    the silent default (the unarmed thermostat the typo armed) is the
+    defect this refusal replaces."""
+    with pytest.raises(ValueError, match="hysteresys_c.*IdealThermostat"):
+        make_dwelling().add_actor_by_name(
+            "IdealThermostat",
+            "Thermostat",
+            {"target": HEATING, "hysteresys_c": 2.0},
+        )
+
+
+def test_wrong_typed_param_is_refused_naming_the_expected_type() -> None:
+    """A string where the factory reads a number is refused naming the
+    parameter and the expected type: a Text `heating_c` armed no
+    setpoint at all."""
+    with pytest.raises(ValueError, match="heating_c.*float"):
+        make_dwelling().add_actor_by_name(
+            "IdealThermostat",
+            "Thermostat",
+            {"target": HEATING, "heating_c": "21"},
+        )

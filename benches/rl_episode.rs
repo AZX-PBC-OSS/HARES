@@ -88,6 +88,7 @@ fn bench_rl_episode(c: &mut Criterion) {
     bench_episode_single(c, dir);
     bench_episode_vec(c, dir);
     bench_batch_step(c, dir);
+    bench_rl_boundary(c, dir);
 }
 
 /// Benchmark: Dwelling construction (the "reset" path).
@@ -406,3 +407,69 @@ fn bench_batch_step(c: &mut Criterion, dir: &Path) {
 
 criterion_group!(benches, bench_rl_episode);
 criterion_main!(benches);
+/// The RL boundary: the path a policy runs. Each step applies one fixed
+/// action through `apply_control` (a thermal setpoint on the furnace),
+/// reads the observation through the frozen plan, and computes the
+/// default reward (minus the step's net power in kW, converted once from
+/// the step's watts), the per-step work the raw `Dwelling::step` benches
+/// above exclude. 8 and 16 envs, a day's episode at the two RL time
+/// resolutions (900 s and 60 s), the real observation width (the
+/// narrow five-field set, no padded duplication); the throughput unit is
+/// the env-step, so the published number is env-steps/s. The raw step
+/// benches keep their own names as the engine-side baseline.
+fn bench_rl_boundary(c: &mut Criterion, dir: &Path) {
+    use hares_types::ControlSignal;
+
+    let mut group = c.benchmark_group("rl_boundary");
+    let signal = ControlSignal::ThermalSetpoint {
+        heating_setpoint_c: Some(21.0),
+        cooling_setpoint_c: None,
+        deadband_c: Some(2.0),
+    };
+    for &n_envs in &[8usize, 16] {
+        for &(time_res_s, label) in &[(900i64, "res900s"), (60i64, "res60s")] {
+            let n_steps = (86_400i64 / time_res_s) as usize;
+            group.throughput(Throughput::Elements((n_envs * n_steps) as u64));
+            let year_long = time_res_s == 60;
+            group.sample_size(10);
+            group.warm_up_time(Duration::from_secs(if year_long { 5 } else { 2 }));
+            group.measurement_time(Duration::from_secs(if year_long { 20 } else { 8 }));
+            group.bench_function(
+                BenchmarkId::new("fixed_policy_day", format!("{n_envs}envs_{label}")),
+                |b| {
+                    b.iter_batched(
+                        || {
+                            let fields: Vec<String> =
+                                NARROW_FIELDS.iter().map(|s| (*s).to_string()).collect();
+                            (0..n_envs)
+                                .map(|_| {
+                                    let dwelling = make_dwelling(dir, 86_400, time_res_s);
+                                    let plan = dwelling
+                                        .observation_plan(&fields)
+                                        .expect("the narrow fields resolve");
+                                    (dwelling, plan)
+                                })
+                                .collect::<Vec<_>>()
+                        },
+                        |mut envs| {
+                            envs.par_iter_mut().for_each(|(dwelling, plan)| {
+                                let mut out = vec![0.0_f64; NARROW_FIELDS.len()];
+                                for _ in 0..n_steps {
+                                    dwelling.apply_control("Electric Furnace", signal.clone());
+                                    let step_result = dwelling.step().expect("step");
+                                    dwelling.observe_into(plan, &mut out).expect("observe");
+                                    // The default reward: minus the step's
+                                    // net electric power in kW, the same
+                                    // conversion the gym's applies.
+                                    black_box(-step_result.net_electric_power_w / 1000.0);
+                                }
+                            });
+                        },
+                        criterion::BatchSize::LargeInput,
+                    );
+                },
+            );
+        }
+    }
+    group.finish();
+}

@@ -5156,10 +5156,14 @@ impl Dwelling {
                 (name, *zone)
             })
             .collect();
-        let equipment_names: Vec<String> = self
+        // The plan's equipment bindings carry the descriptor's
+        // never-reused id beside the position: the live executor resolves
+        // the id at read, so a roster change between the plan's build and
+        // a read cannot shift a planned field onto another unit.
+        let equipment: Vec<(String, EquipmentId)> = self
             .equipment
             .iter()
-            .map(|eq| eq.descriptor().name.clone())
+            .map(|eq| (eq.descriptor().name.clone(), eq.descriptor().id))
             .collect();
         // BTreeMap: the same sorted-name order the telemetry's
         // actor_telemetry map reports, so a plan's bare-name fallback
@@ -5178,7 +5182,7 @@ impl Dwelling {
         }
         let surface = ObservationSurface {
             zone_names,
-            equipment_names,
+            equipment,
             actors: actor_channels.into_iter().collect(),
         };
         let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
@@ -5243,13 +5247,14 @@ impl Dwelling {
                 self.zone_setpoint_c(*id, SetpointSide::Cool)?
             }
             ObservationKind::ZoneEnergyBalance { id, .. } => self.zone_energy_balance_w(*id),
-            ObservationKind::EquipmentSoc { index } => self.equipment[*index]
+            ObservationKind::EquipmentSoc { id, .. } => self
+                .equipment_soc_by_id(*id, source.field.as_str())?
                 .core_output()
                 .state
                 .soc
                 .map_or(0.0, |s| s.get()),
-            ObservationKind::EquipmentPower { index } => self
-                .delivered_output(*index)
+            ObservationKind::EquipmentPower { id, .. } => self
+                .delivered_output(self.equipment_position_by_id(*id, source.field.as_str())?)
                 .and_then(|delivered| delivered.flows.electric_w)
                 .map_or(0.0, |e| e.net_consumption_w()),
             ObservationKind::TimeSin => self.time_feature(false),
@@ -5291,6 +5296,29 @@ impl Dwelling {
                     "planned zone {id:?} is no longer in the dwelling's zone list"
                 ))
             })
+    }
+
+    /// The roster position of the planned equipment id, the same
+    /// position-into-dwelling-order the plan froze; a roster change since
+    /// the plan's build is a typed error naming the planned field and the
+    /// missing id, never a shifted read or an index panic.
+    fn equipment_position_by_id(&self, id: EquipmentId, field: &str) -> Result<usize> {
+        self.equipment
+            .iter()
+            .position(|eq| eq.descriptor().id == id)
+            .ok_or_else(|| {
+                HaresError::Control(format!(
+                    "planned field `{field}`'s equipment (id {id}) is no longer \
+                     in the dwelling's equipment roster"
+                ))
+            })
+    }
+
+    /// The planned equipment unit itself, by its never-reused id.
+    fn equipment_soc_by_id(&self, id: EquipmentId, field: &str) -> Result<&dyn Equipment> {
+        let position = self.equipment_position_by_id(id, field)?;
+        let eq = &self.equipment[position];
+        Ok(eq.as_ref())
     }
 
     /// The per-zone setpoint the telemetry snapshot reports: the zone
@@ -9744,6 +9772,94 @@ destination = "memory"
              per-equipment capture must clone the telemetry map through \
              its own clone_from",
             delta,
+        );
+    }
+
+    /// The frozen observation plan binds equipment by the descriptor's
+    /// never-reused `EquipmentId`, never the roster position: a roster
+    /// change between the plan's build and a read cannot shift a planned
+    /// field onto another unit, and the surviving unit is read under its
+    /// own name. RED at the position-bound base: the planned field reads
+    /// the shifted unit's power.
+    #[test]
+    fn observation_plan_reads_surviving_equipment_under_its_own_name_after_a_removal() {
+        let (_dir, toml_path) = temp_toml("observation_plan_equipment_id_survivor");
+        write_minimal_toml(&toml_path);
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("Unit A", 500.0, &[true]).with_id(11),
+            ))
+            .expect("add Unit A");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("Unit B", 300.0, &[true]).with_id(12),
+            ))
+            .expect("add Unit B");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("Unit C", 200.0, &[true]).with_id(13),
+            ))
+            .expect("add Unit C");
+        dwelling.step().expect("one step");
+        let plan = dwelling
+            .observation_plan(&["equipment_power[Unit B]".to_string()])
+            .expect("the plan resolves");
+        dwelling.remove_equipment("Unit A").expect("remove Unit A");
+
+        let mut out = vec![0.0_f64; 1];
+        dwelling
+            .observe_into(&plan, &mut out)
+            .expect("the surviving unit's field still resolves");
+        // Unit B's own 300 W: the position-bound base reads the shifted
+        // unit's power (Unit C's 200 W) with no error.
+        assert_eq!(
+            out[0], 300.0,
+            "equipment_power[Unit B] must read Unit B's own power after \
+             Unit A left the roster"
+        );
+    }
+
+    /// A unit the plan named that has left the roster is a typed error
+    /// naming the field and the id, not a panic out of bounds and not a
+    /// silent read of whatever took the slot. RED at the position-bound
+    /// base: the read panics (or reads the shifted unit).
+    #[test]
+    fn observation_plan_refuses_a_removed_equipment_field_by_name_and_id() {
+        let (_dir, toml_path) = temp_toml("observation_plan_equipment_id_removed");
+        write_minimal_toml(&toml_path);
+        let mut dwelling = Dwelling::from_toml_config(&toml_path).expect("build dwelling");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("Unit A", 500.0, &[true]).with_id(11),
+            ))
+            .expect("add Unit A");
+        dwelling
+            .add_equipment(Box::new(
+                FlakyPortEquipment::new("Unit C", 200.0, &[true]).with_id(13),
+            ))
+            .expect("add Unit C");
+        dwelling.step().expect("one step");
+        let plan = dwelling
+            .observation_plan(&[
+                "equipment_power[Unit A]".to_string(),
+                "equipment_power[Unit C]".to_string(),
+            ])
+            .expect("the plan resolves");
+        dwelling.remove_equipment("Unit A").expect("remove Unit A");
+
+        let mut out = vec![0.0_f64; 2];
+        let err = dwelling
+            .observe_into(&plan, &mut out)
+            .expect_err("the removed unit's field must be a typed error");
+        let message = err.to_string();
+        assert!(
+            message.contains("equipment_power[Unit A]"),
+            "the error must name the planned field: {message}"
+        );
+        assert!(
+            message.contains("11"),
+            "the error must name the missing equipment id: {message}"
         );
     }
 

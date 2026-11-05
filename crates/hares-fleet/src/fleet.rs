@@ -72,26 +72,9 @@ pub fn home_status(run: &std::result::Result<RunResult, HaresError>) -> HomeStat
     if let Some(warning) = result.warnings.first() {
         events.push(format!("warning: {warning}"));
     }
-    let health = &result.health;
-    let counters = [
-        ("port_rollbacks", health.port_rollbacks),
-        ("rejected_control_signals", health.rejected_control_signals),
-        ("clamped_actions", health.clamped_actions),
-        ("curve_index_clamps", health.curve_index_clamps),
-        ("fluid_payload_absences", health.fluid_payload_absences),
-        ("evicted_actors", health.evicted_actors),
-    ];
-    for (name, count) in counters {
-        if count > 0 {
-            events.push(format!("{name}: {count}"));
-        }
-    }
-    if let WarmupOutcome::Ran {
-        converged: false, ..
-    } = health.warmup
-    {
-        events.push("the warm-up did not converge".to_string());
-    }
+    // The run health's one degradation enumeration: every counter and the
+    // warm-up outcome, classified from the same list a report fold reads.
+    events.extend(result.health.degradation_events());
     if events.is_empty() {
         HomeStatus::Ok
     } else {
@@ -925,6 +908,7 @@ impl Fleet {
                     periods_folded: 0,
                     metrics: outcome.metrics,
                     closure: outcome.closure,
+                    health: outcome.health,
                 });
                 folded_flags.push(folds);
             }
@@ -1492,6 +1476,8 @@ struct HomeRun {
     metrics: Option<hares_core::RunMetrics>,
     /// The run's energy-closure telemetry, from the run result's health.
     closure: Option<HomeClosureTelemetry>,
+    /// The run's own health counters, from the run result.
+    health: Option<hares_core::RunHealth>,
     /// The home's reduced period table, keyed by the period start's
     /// instant (the epoch key), the `Time` column excluded.
     table: BTreeMap<i64, Vec<Option<f64>>>,
@@ -1564,6 +1550,7 @@ fn run_home(
                 steps: 0,
                 metrics: None,
                 closure: None,
+                health: None,
                 table: BTreeMap::new(),
                 fields: Vec::new(),
             }));
@@ -1585,6 +1572,7 @@ fn run_home(
                         steps: 0,
                         metrics: None,
                         closure: None,
+                        health: None,
                         table: BTreeMap::new(),
                         fields: Vec::new(),
                     }
@@ -1651,6 +1639,7 @@ fn run_home_body(
         steps: 0,
         metrics: None,
         closure: None,
+        health: None,
         table: BTreeMap::new(),
         fields: Vec::new(),
     };
@@ -1711,6 +1700,7 @@ fn run_home_body(
                 WarmupOutcome::Ran { days_run, .. } => Some(*days_run),
             },
         }),
+        health: Some(result.health),
         table,
         fields,
     }
@@ -6481,7 +6471,9 @@ mod tests {
         };
         assert_eq!(status(&run(converged, Vec::new())), HomeStatus::Ok);
 
-        // Each non-zero health counter alone is Degraded naming it.
+        // Each non-zero health counter alone is Degraded naming it, the
+        // run's every counter through the one enumeration: a new counter
+        // the enumeration misses cannot classify as Ok here.
         let counters = [
             "port_rollbacks",
             "rejected_control_signals",
@@ -6489,6 +6481,8 @@ mod tests {
             "curve_index_clamps",
             "fluid_payload_absences",
             "evicted_actors",
+            "cross_tier_deadband_events",
+            "ideal_capacity_unsolved_steps",
         ];
         for name in counters {
             let mut health = RunHealth::default();
@@ -6499,6 +6493,8 @@ mod tests {
                 "curve_index_clamps" => health.curve_index_clamps = 1,
                 "fluid_payload_absences" => health.fluid_payload_absences = 1,
                 "evicted_actors" => health.evicted_actors = 1,
+                "cross_tier_deadband_events" => health.cross_tier_deadband_events = 1,
+                "ideal_capacity_unsolved_steps" => health.ideal_capacity_unsolved_steps = 1,
                 other => panic!("no such counter: {other}"),
             }
             match status(&run(health, Vec::new())) {

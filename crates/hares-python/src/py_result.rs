@@ -1199,6 +1199,7 @@ mod tests {
                 Some(PyString::new(py, defaults.to_str().expect("utf8")).as_any()),
                 None,
                 None,
+                None,
             )
             .expect("the cz4a fixture must construct");
             py_dwelling.initialize().expect("initialize");

@@ -15,11 +15,28 @@ import numpy as np
 
 from hares._hares import Dwelling as PyDwelling
 from hares._hares import batch_step as _extension_batch_step
+from hares._hares import clip_action
 
 try:
     from gymnasium import spaces
+    from gymnasium.vector import VectorEnv as _VectorEnvBaseRuntime
 except ImportError:  # pragma: no cover - optional dependency
     spaces = None
+    _VectorEnvBaseRuntime = object  # type: ignore[assignment, misc]
+
+if TYPE_CHECKING:
+    # The checker sees the real base class, parameterized by the env's
+    # types (the observations, rewards and actions are float64 ndarrays);
+    # at runtime the guarded import above decides.
+    from gymnasium.vector import VectorEnv as _GymVectorEnv
+
+    _VectorEnvBase = _GymVectorEnv[np.ndarray, np.ndarray, np.ndarray]
+else:
+    _VectorEnvBase = _VectorEnvBaseRuntime  # type: ignore[assignment, misc]
+
+# The Gymnasium presence: the base class is the real VectorEnv only when
+# Gymnasium is installed (the fallback keeps the importable surface).
+_HAS_VECTOR_BASE = _VectorEnvBaseRuntime is not object
 
 from .gym_env import (
     RewardContext,
@@ -29,9 +46,10 @@ from .gym_env import (
     field_bounds,
     observation_field_bounds,
     sorted_action_layout,
-    telemetry_to_observation,
     validate_episode_length,
+    validate_reward_fn,
     validated_auto_reset,
+    validated_bounds_overrides,
     validated_observation_fields,
     validated_reset_seed,
     validated_seed_sequence,
@@ -50,7 +68,6 @@ __all__ = [
     "observation_field_bounds",
     "rust_batch_step",
     "sorted_action_layout",
-    "telemetry_to_observation",
 ]
 
 # The extension's batch entrypoint, held as an Optional module global so
@@ -75,13 +92,24 @@ def _reward_context(step_data: StepResult, dwelling: PyDwelling) -> RewardContex
     )
 
 
-class VecDwellingGymEnv:
+def _default_reward(step_data: StepResult) -> float:
+    """The default reward, the single env's: minus the step's net electric
+    power in kW, converted once from the step dict's watts."""
+    return -float(step_data["net_electric_power_w"]) / 1000.0
+
+
+class VecDwellingGymEnv(_VectorEnvBase):
+    """The fleet's vector environment, a Gymnasium `VectorEnv` when
+    Gymnasium is installed: the standard vector wrappers accept it, the
+    per-env spaces ride `single_observation_space` /
+    `single_action_space` (the fleet steps one shared space), and the
+    base's `close` bookkeeping drives `close_extras`."""
     def __init__(
         self,
         dwellings: Sequence[PyDwelling],
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[RewardContext], float],
+        reward_fn: Callable[[RewardContext], float] | None,
         episode_length: timedelta,
         time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
@@ -89,12 +117,16 @@ class VecDwellingGymEnv:
         auto_reset: object = False,
         seed_sequence: object = None,
     ) -> None:
+        """The reward contract is the single env's: a callable over the
+        ``RewardContext`` or ``None`` for the default (minus the step's
+        net electric power in kW, converted once from the context's
+        watts), the same default and the same unit on both step paths, so
+        one fixture's two paths reward bitwise equally."""
         self._observation_fields = validated_observation_fields(observation_fields)
-        if not callable(reward_fn):
-            raise TypeError(
-                f"reward_fn must be callable, got {type(reward_fn).__name__}"
-            )
+        validate_reward_fn(reward_fn)
         validate_episode_length(episode_length)
+        validated_bounds_overrides(field_bounds_overrides, self._observation_fields)
+        self._reward_fn = reward_fn
         self._auto_reset = validated_auto_reset(auto_reset)
         seed_sequence = validated_seed_sequence(seed_sequence)
 
@@ -152,6 +184,9 @@ class VecDwellingGymEnv:
         # stepping again (Gymnasium's SyncVectorEnv(copy=...) has the same
         # contract).
         self._copy = copy
+        # The Gymnasium VectorEnv's bookkeeping flag: `close()` sets it
+        # once and a second close reads it short.
+        self.closed = False
 
         self._action_layout, self._signal_type_by_equipment = sorted_action_layout(
             action_space_config
@@ -203,12 +238,20 @@ class VecDwellingGymEnv:
                 shape=(len(self._action_layout),),
                 dtype=np.float64,
             )
+            # The per-env spaces: the fleet steps one shared observation
+            # and action space (the constructor refuses bounds that differ
+            # across the dwellings), so the single env's spaces are these.
+            self.single_observation_space = self.observation_space
+            self.single_action_space = self.action_space
         else:
-            self.observation_space = {
+            # The no-Gymnasium surface keeps its dict-shaped stand-ins
+            # (the base class's space attributes do not exist to type
+            # against).
+            self.observation_space = {  # type: ignore[reportAttributeAccessIssue]
                 "shape": (len(self._observation_fields),),
                 "dtype": np.float64,
             }
-            self.action_space = {
+            self.action_space = {  # type: ignore[reportAttributeAccessIssue]
                 "shape": (len(self._action_layout),),
                 "dtype": np.float64,
                 "low": action_low_arr,
@@ -298,7 +341,10 @@ class VecDwellingGymEnv:
             return int(seed) + idx
         return self._next_episode_seed(idx)
 
-    def reset(
+    # The infos slot is the documented divergence from the base class's
+    # batch-dict shape: every row is one env's own dict, the shape the
+    # extension's info contract publishes.
+    def reset(  # type: ignore[reportIncompatibleMethodOverride]
         self,
         *,
         seed: object = None,
@@ -373,24 +419,62 @@ class VecDwellingGymEnv:
             infos[idx]["initial_observation_mask"] = ~np.isfinite(obs[idx])
         return obs.astype(np.float64, copy=False), infos
 
-    def _apply_actions(self, dwelling: PyDwelling, action: np.ndarray) -> None:
-        """Clip one dwelling's action row to the layout's per-column bounds
-        and apply it as control signals, equipment by sorted name: the same
-        clip-and-dispatch the extension's ``batch_step`` runs."""
+    def _reward_for(self, step_data: StepResult, dwelling: PyDwelling) -> float:
+        """The step's reward: the caller's callable over the context, or
+        the default (minus the net power in kW) when no callable was
+        given. The telemetry dicts are built only for a callable that
+        reads them, the same economy the single env's step keeps."""
+        if self._reward_fn is None:
+            return _default_reward(step_data)
+        return float(self._reward_fn(_reward_context(step_data, dwelling)))
+
+    def _prepare_actions(
+        self, dwelling: PyDwelling, action: np.ndarray
+    ) -> list[tuple[str, Any]]:
+        """Validate one dwelling's action row without changing the
+        dwelling: the same finite screen and per-column clip the extension
+        applies, and the same queue-time acceptance check each signal must
+        pass. Returns the signals to dispatch once every environment's row
+        is accepted, so a refused row in one environment leaves every
+        dwelling untouched, the ``batch_step`` contract."""
+        raw = [float(value) for value in action]
+        for index, (equipment, field) in enumerate(self._action_layout):
+            if not math.isfinite(raw[index]):
+                raise ValueError(
+                    f"action value at index {index} for {equipment}.{field} "
+                    f"is not finite: {raw[index]}"
+                )
         clipped = np.clip(action, self._action_low, self._action_high)
         action_values: dict[str, dict[str, float]] = {}
-        for col, (equipment, field) in enumerate(self._action_layout):
-            action_values.setdefault(equipment, {})[field] = float(clipped[col])
+        for (equipment, field), value in zip(self._action_layout, clipped, strict=True):
+            action_values.setdefault(equipment, {})[field] = float(value)
+        signals: list[tuple[str, Any]] = []
         for equipment in sorted(action_values):
-            dwelling.apply_control(
-                equipment,
-                build_control_signal(
-                    self._signal_type_by_equipment[equipment],
-                    action_values[equipment],
-                ),
+            signal = build_control_signal(
+                self._signal_type_by_equipment[equipment],
+                action_values[equipment],
             )
+            # Queue-time acceptance: the same refusal the batch path
+            # raises, before any signal reaches any equipment.
+            dwelling.check_control(equipment, signal)
+            signals.append((equipment, signal))
+        return signals
 
-    def step(self, actions: np.ndarray):
+    def _apply_actions(
+        self, dwelling: PyDwelling, action: np.ndarray, signals: list[tuple[str, Any]]
+    ) -> None:
+        """One dwelling's prepared action row through the batch path's own
+        counted clip: the extension's ``clip_action`` records the clamp
+        count on the acting dwelling's run health in every build, then the
+        signals the pre-pass already accepted dispatch by sorted name."""
+        clip_action(dwelling, [float(value) for value in action], self._action_layout)
+        for equipment, signal in signals:
+            dwelling.apply_control(equipment, signal)
+
+    # The infos slot is the documented divergence from the base class's
+    # batch-dict shape: every row is one env's own dict, the shape the
+    # extension's info contract publishes.
+    def step(self, actions: np.ndarray):  # type: ignore[reportIncompatibleMethodOverride]
         """Advance every dwelling one timestep.
 
         ``actions`` is the ``(n_envs, n_actions)`` float64 array, passed to
@@ -403,9 +487,12 @@ class VecDwellingGymEnv:
         present) and ``"warnings"`` (list[str], present only when the count
         is non-zero, the warnings drained from that dwelling during the
         step, e.g. control signals rejected at dispatch time). Both step
-        paths clip actions to the declared bounds and call ``reward_fn``
-        per environment on the same ``RewardContext`` built from the step
-        dict and the dwelling's telemetry: one reward contract.
+        paths clip actions through the same counted clip and run the same
+        queue-time acceptance check, and both reward per environment: the
+        caller's ``reward_fn`` over the same ``RewardContext`` built from
+        the step dict and the dwelling's telemetry, or, for ``reward_fn=None``,
+        the same default the single env pays (minus the net power in kW).
+        One reward contract, one health contract.
 
         With ``auto_reset`` set, an env whose episode ended (terminated or
         truncated) resets alone before the step returns: its observation
@@ -450,25 +537,31 @@ class VecDwellingGymEnv:
                     # the 0.0 a failed step has always reported.
                     rewards.append(0.0)
                 else:
-                    rewards.append(
-                        float(self._reward_fn(_reward_context(step_data, dwelling)))
-                    )
+                    rewards.append(self._reward_for(step_data, dwelling))
                 dones.append(bool(row["terminated"]))
                 truncs.append(bool(row["truncated"]))
                 info = dict(row.get("info", {}))
                 info["step"] = step_data
                 infos.append(info)
         else:
-            for idx, (dwelling, action_row) in enumerate(
-                zip(self._dwellings, arr, strict=True)
+            # Every row is validated before any dwelling is touched: a
+            # refused action in one environment leaves every dwelling
+            # unstepped, the batch path's atomic refusal.
+            rows = list(zip(self._dwellings, arr, strict=True))
+            prepared = [
+                self._prepare_actions(dwelling, action_row)
+                for dwelling, action_row in rows
+            ]
+            for idx, ((dwelling, action_row), signals) in enumerate(
+                zip(rows, prepared, strict=True)
             ):
-                self._apply_actions(dwelling, action_row)
+                self._apply_actions(dwelling, action_row, signals)
                 step_data = dwelling.step()
                 # The same plan the batch path reads through, into the
                 # same buffer: the two paths read the same values by
                 # construction.
                 dwelling.observe_into(plans[idx], self._obs_buffer[idx])
-                rewards.append(float(self._reward_fn(_reward_context(step_data, dwelling))))
+                rewards.append(self._reward_for(step_data, dwelling))
                 dones.append(False)
                 truncs.append(False)
                 warning_count, warning_messages = drain_step_warnings(dwelling)
@@ -561,8 +654,21 @@ class VecDwellingGymEnv:
         ``health()`` reads at any step."""
         return self._dwellings
 
-    def close(self) -> None:
-        return None
+    def close(self, **kwargs: Any) -> None:
+        """The base `VectorEnv.close`'s bookkeeping when Gymnasium is
+        installed (`closed` set once, `close_extras` called); the
+        dwellings hold no resources of their own to release."""
+        del kwargs
+        # The runtime base is the real VectorEnv whenever Gymnasium is
+        # installed; the fallback's close is this branch's own.
+        if _HAS_VECTOR_BASE:
+            _VectorEnvBaseRuntime.close(self)  # type: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        else:
+            self.closed = True
+
+    def close_extras(self, **kwargs: Any) -> None:
+        """The fleet's dwellings need no external resource release."""
+        del kwargs
 
     def env_method(
         self,

@@ -320,3 +320,29 @@ replacement.
   category, nothing written. `Provenance.tariff` reads the attached
   tariff as a dict holding `tariff` (the tariff's own dict) and `zone`
   (the IANA name), or `None`.
+- Added: `ScenarioSample` (with `master_seed`, `scenario_id`, `bldg_id`
+  and `overrides()`), `ScenarioSpec.sample_record(master_seed, scenario_id,
+  bldg_id)` and the `scenario_sample=` keyword on `Dwelling.from_hpxml`:
+  the scenario pairing handle. A sample's draw key is the
+  `(master_seed, scenario_id, bldg_id)` triple; the constructor refuses
+  a build whose `SimulationConfig.scenario_seed`, `master_seed` or
+  `bldg_id` differs from the handle's, naming both values before any
+  home runs. A matched handle applies its sampled overrides (the
+  caller's own `overrides=` entries win per key). The free-standing
+  `sample` and `sample_overrides` forms remain unchecked, the
+  documented default for a study that does not bind the handle.
+- Added: the stub's member lines for the members the binding publishes:
+  the pickling state `state_json()` on `Selection`, `Frequency`,
+  `Destination` and `ReportSpec` (each configuration object's own serde
+  JSON, so it crosses a process boundary as data),
+  `StormWatchTrigger`'s `is_manual`, `wind_speed_threshold_m_s` and
+  `wind_speed_deactivation_threshold_m_s` reads,
+  `Battery.tesla_pw2_nca()`, the `TariffBuilder` setters
+  `set_export_hourly_schedule()` and
+  `set_minimum_charge_excludes_export()`, the `GridExportRule`
+  constructors `solar_only()`, `unrestricted()`, `disabled()` and
+  `from_str()`, `Mode.On` with its `on()` factory, and the `EndUse`
+  variants `COOKING`, `LAUNDRY`, `DISHWASHER`, `POOL_PUMP`,
+  `POOL_HEATER`, `SPA_PUMP`, `SPA_HEATER` and `CEILING_FAN`. The stub is
+  the static type contract: a member the binding publishes without the
+  stub line is a pyright error for typed callers.

@@ -124,6 +124,10 @@ pub struct HomeResult {
     /// flux the run reported and the warm-up days it ran. `None` for a home
     /// that failed to build or run (no run, no account).
     pub closure: Option<HomeClosureTelemetry>,
+    /// The run's own health counters: the structured degradation record
+    /// the status string is classified from. `None` for a home that
+    /// failed to build or run.
+    pub health: Option<hares_core::RunHealth>,
 }
 
 /// One home's energy-closure telemetry, carried on its [`HomeResult`] row:
@@ -859,9 +863,11 @@ impl BatchCallback for ReducerFeed {
 }
 
 /// The homes table as a batch: one row per home, in entry order, with the
-/// run metrics' columns when any home requested them.
+/// run metrics' columns when any home requested them and the run health's
+/// typed counter columns when any home carries a run.
 pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
     let any_metrics = homes.iter().any(|home| home.metrics.is_some());
+    let any_health = homes.iter().any(|home| home.health.is_some());
     let mut bldg_ids = arrow::array::Int64Builder::new();
     let mut weights = Float64Builder::new();
     let mut statuses = StringBuilder::new();
@@ -870,6 +876,8 @@ pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
     let mut periods = arrow::array::Int64Builder::new();
     let mut total_energy = Float64Builder::new();
     let mut peak_power = Float64Builder::new();
+    let mut health_counters: [arrow::array::Int64Builder; 8] = Default::default();
+    let mut health_discarded = Float64Builder::new();
 
     for home in homes {
         bldg_ids.append_value(home.bldg_id);
@@ -898,6 +906,29 @@ pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
             None if any_metrics => peak_power.append_null(),
             None => peak_power.append_value(0.0),
         }
+        let health = home.health.as_ref();
+        if any_health {
+            let counters = [
+                health.map(|h| h.port_rollbacks),
+                health.map(|h| h.rejected_control_signals),
+                health.map(|h| h.clamped_actions),
+                health.map(|h| h.curve_index_clamps),
+                health.map(|h| h.fluid_payload_absences),
+                health.map(|h| h.evicted_actors),
+                health.map(|h| h.cross_tier_deadband_events),
+                health.map(|h| h.ideal_capacity_unsolved_steps),
+            ];
+            for (builder, value) in health_counters.iter_mut().zip(counters) {
+                match value {
+                    Some(count) => builder.append_value(i64::try_from(count).unwrap_or(i64::MAX)),
+                    None => builder.append_null(),
+                }
+            }
+            match health.map(|h| h.discarded_state_energy_wh) {
+                Some(value) => health_discarded.append_value(value),
+                None => health_discarded.append_null(),
+            }
+        }
     }
 
     let mut fields = vec![
@@ -922,6 +953,27 @@ pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
         arrays.push(Arc::new(total_energy.finish()));
         arrays.push(Arc::new(peak_power.finish()));
     }
+    if any_health {
+        for (name, builder) in [
+            ("health_port_rollbacks", 0usize),
+            ("health_rejected_control_signals", 1),
+            ("health_clamped_actions", 2),
+            ("health_curve_index_clamps", 3),
+            ("health_fluid_payload_absences", 4),
+            ("health_evicted_actors", 5),
+            ("health_cross_tier_deadband_events", 6),
+            ("health_ideal_capacity_unsolved_steps", 7),
+        ] {
+            fields.push(Field::new(name, DataType::Int64, true));
+            arrays.push(Arc::new(health_counters[builder].finish()));
+        }
+        fields.push(Field::new(
+            "health_discarded_state_energy_wh",
+            DataType::Float64,
+            true,
+        ));
+        arrays.push(Arc::new(health_discarded.finish()));
+    }
     let schema = Arc::new(Schema::new(fields));
     RecordBatch::try_new(schema, arrays).expect("the homes table is well formed")
 }
@@ -930,6 +982,7 @@ pub(crate) fn homes_batch(homes: &[HomeResult]) -> RecordBatch {
 mod tests {
     use super::*;
     use arrow::array::{Array, Float64Array, TimestampMillisecondArray};
+    use hares_core::RunHealth;
     use hares_types::Unit;
 
     fn field(name: &str, unit: &str) -> Field {
@@ -1002,6 +1055,7 @@ mod tests {
             periods_folded: 0,
             metrics: None,
             closure,
+            health: None,
         };
         vec![
             home(1, None),
@@ -1030,6 +1084,100 @@ mod tests {
                 }),
             ),
         ]
+    }
+
+    /// The homes table carries the run health's typed counter columns when
+    /// any home carries a run: one column per `RunHealth` counter, the
+    /// value the run recorded, null for a home with no run. A lake
+    /// manifest's rollup reads the counters from these columns, never
+    /// from the reason string.
+    #[test]
+    fn homes_table_carries_every_health_counter_as_typed_columns() {
+        let degraded = RunHealth {
+            port_rollbacks: 1,
+            rejected_control_signals: 2,
+            clamped_actions: 3,
+            curve_index_clamps: 4,
+            fluid_payload_absences: 5,
+            evicted_actors: 6,
+            cross_tier_deadband_events: 7,
+            ideal_capacity_unsolved_steps: 8,
+            discarded_state_energy_wh: 9.5,
+            ..RunHealth::default()
+        };
+        let homes = vec![
+            HomeResult {
+                bldg_id: 1,
+                weight: 1.0,
+                status: HomeStatus::Degraded("counter: 1".to_string()),
+                reason: Some("the degradation".to_string()),
+                steps: 1,
+                periods_folded: 0,
+                metrics: None,
+                closure: None,
+                health: Some(degraded),
+            },
+            HomeResult {
+                bldg_id: 2,
+                weight: 1.0,
+                status: HomeStatus::Failed("no run".to_string()),
+                reason: Some("no run".to_string()),
+                steps: 0,
+                periods_folded: 0,
+                metrics: None,
+                closure: None,
+                health: None,
+            },
+        ];
+        let batch = homes_batch(&homes);
+        let column = |name: &str| -> Option<i64> {
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .find(|f| f.name() == name)
+                .map(|_field| {
+                    let values = batch
+                        .column(batch.schema().index_of(name).expect("the column exists"))
+                        .as_any()
+                        .downcast_ref::<arrow::array::Int64Array>()
+                        .expect("a typed counter column")
+                        .clone();
+                    values.value(0)
+                })
+        };
+        assert_eq!(column("health_port_rollbacks"), Some(1));
+        assert_eq!(column("health_rejected_control_signals"), Some(2));
+        assert_eq!(column("health_clamped_actions"), Some(3));
+        assert_eq!(column("health_curve_index_clamps"), Some(4));
+        assert_eq!(column("health_fluid_payload_absences"), Some(5));
+        assert_eq!(column("health_evicted_actors"), Some(6));
+        assert_eq!(column("health_cross_tier_deadband_events"), Some(7));
+        assert_eq!(column("health_ideal_capacity_unsolved_steps"), Some(8));
+        let discarded = batch
+            .column(
+                batch
+                    .schema()
+                    .index_of("health_discarded_state_energy_wh")
+                    .expect("exists"),
+            )
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .expect("the typed Wh column")
+            .value(0);
+        assert_eq!(discarded, 9.5);
+        // The no-run home's counters are null, not zero.
+        for name in [
+            "health_port_rollbacks",
+            "health_ideal_capacity_unsolved_steps",
+        ] {
+            let values = batch
+                .column(batch.schema().index_of(name).expect("exists"))
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .expect("a typed counter column");
+            assert!(values.is_null(1), "{name} is null for a home with no run");
+        }
     }
 
     /// The fleet's closure telemetry folds the per-home residuals' mean and

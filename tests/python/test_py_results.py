@@ -403,26 +403,75 @@ def test_stubs_cover_every_binding() -> None:
     assert missing_from_module == set(), f"stub names missing from the module: {missing_from_module}"
 
 
-def test_telemetry_stub_carries_every_public_member() -> None:
-    """The Telemetry stub class lists every public runtime member: the stub
-    is the static type contract, and a getter the Rust binding adds without
-    the stub is an attribute error for typed callers."""
-    import hares._hares as _hares
+def stub_class_names() -> list[str]:
+    """Every class the stub declares, the parameter set of the member
+    witness below."""
+    tree = ast.parse((ROOT / "python/hares/_hares.pyi").read_text())
+    return [node.name for node in tree.body if isinstance(node, ast.ClassDef)]
 
+
+def stub_class_members(name: str) -> tuple[set[str], set[str]]:
+    """The named stub class's declared functions (methods and properties)
+    and value attributes (the enum members it declares as annotations)."""
     tree = ast.parse((ROOT / "python/hares/_hares.pyi").read_text())
     cls = next(
         node
         for node in tree.body
-        if isinstance(node, ast.ClassDef) and node.name == "Telemetry"
+        if isinstance(node, ast.ClassDef) and node.name == name
     )
-    stub = {
+    functions = {
         node.name
         for node in cls.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    runtime = {name for name in dir(_hares.Telemetry) if not name.startswith("_")}
-    missing = runtime - stub
-    assert missing == set(), f"Telemetry stub missing public members: {sorted(missing)}"
+    values = {
+        node.target.id
+        for node in cls.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+    }
+    return functions, values
+
+
+@pytest.mark.parametrize("name", stub_class_names())
+def test_stub_class_carries_every_public_member(name: str) -> None:
+    """Every stub class lists the public members its binding publishes: the
+    stub is the static type contract, and a getter the Rust binding adds
+    without the stub is a pyright error for typed callers. The Telemetry
+    precedent, applied to the whole surface: the ScenarioSample handle's
+    master seed was the class-specific case, and a class one over (the
+    report configuration's pickling state, a product preset, a trigger's
+    own thresholds) is the same omission.
+
+    The runtime side reads the class's own members: an inherited member is
+    the base's contract, and the stub declares it once on the base. The
+    function half is the class's routines and data descriptors (methods,
+    static methods, properties); the value half is the unit variants the
+    class carries as instances of itself, which the stub declares as
+    annotations. Payload-carrying variants are classes, not values, and
+    their constructors are the function half's factories."""
+    import inspect
+
+    import hares._hares as _hares
+
+    runtime = getattr(_hares, name)
+    stub_functions, stub_values = stub_class_members(name)
+    functions = {
+        member
+        for member in dir(runtime)
+        if not member.startswith("_")
+        and member in vars(runtime)
+        and (
+            inspect.isroutine(getattr(runtime, member))
+            or inspect.isdatadescriptor(getattr(runtime, member))
+        )
+    }
+    values = {
+        member
+        for member, value in vars(runtime).items()
+        if not member.startswith("_") and isinstance(value, runtime)
+    }
+    missing = (functions - stub_functions) | (values - stub_values)
+    assert missing == set(), f"{name} stub missing public members: {sorted(missing)}"
 
 
 def test_stub_changes_are_listed() -> None:

@@ -8,7 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use hares_types::scenario::ScenarioSpec;
+use hares_types::scenario::{ScenarioSample, ScenarioSpec};
 
 /// Convert a Python object to JSON through its `dict` form: the spec's
 /// declaration is a plain dict of plain values.
@@ -106,6 +106,49 @@ fn json_to_python(py: Python<'_>, json: serde_json::Value) -> PyResult<Py<PyAny>
     })
 }
 
+/// One home's sampled scenario, the pairing handle: the draw key's own
+/// triple, recorded beside the sampled values, so the build can refuse a
+/// mismatched pair: sampled values applied to a home whose behavioral
+/// draws key on another (master seed, scenario, building), refused before
+/// any home runs.
+#[pyclass(name = "ScenarioSample")]
+pub struct PyScenarioSample {
+    /// The master seed the draws ran under.
+    pub master_seed: u64,
+    /// The sampled record: the scenario id, the building id, the values
+    /// and the targets.
+    pub sample: ScenarioSample,
+}
+
+#[pymethods]
+impl PyScenarioSample {
+    /// The master seed the draws ran under.
+    #[getter]
+    pub fn master_seed(&self) -> u64 {
+        self.master_seed
+    }
+
+    /// The scenario id the sample drew under.
+    #[getter]
+    pub fn scenario_id(&self) -> u64 {
+        self.sample.scenario_id
+    }
+
+    /// The building id the sample drew for.
+    #[getter]
+    pub fn bldg_id(&self) -> i64 {
+        self.sample.bldg_id
+    }
+
+    /// The sampled values in the overrides form the dwelling constructor's
+    /// ``overrides=`` accepts (the Override targets only; the Patch
+    /// targets apply through the settings' patches).
+    pub fn overrides(&self) -> PyResult<Py<PyAny>> {
+        let json = self.sample.overrides_json();
+        Python::attach(|py| json_to_python(py, json))
+    }
+}
+
 fn spec_error(err: hares_types::HaresError) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
@@ -133,14 +176,16 @@ fn spec_error(err: hares_types::HaresError) -> PyErr {
 /// both fill the scenario bytes of the scenario-mixed per-dwelling key,
 /// so a sample at ``(master_seed, scenario_id, bldg_id)`` and a dwelling
 /// built with that ``master_seed``, ``scenario_seed = scenario_id`` and
-/// ``bldg_id`` belong to one home. Nothing checks the pairing (the
-/// sampler reads no config, the build reads no record): a study that
-/// samples under one scenario or building and builds under another applies
-/// the values to a home whose behavioral draws come from another key.
+/// ``bldg_id`` belong to one home. The pairing is a typed contract:
+/// `sample_record` returns the handle carrying the draw key it ran
+/// under, and `from_hpxml(scenario_sample=...)` refuses a mismatched
+/// triple naming both values, before any home runs.
 ///
-/// The application surface: `sample_overrides` returns the form the
-/// dwelling constructor's `overrides=` accepts, so the override targets
-/// apply on the Python surface. The patch targets' application is the
+/// The application surface: `sample_overrides` and the handle's
+/// `overrides()` return the form the dwelling constructor's `overrides=`
+/// accepts, so the override targets apply on the Python surface (the
+/// handle's through `from_hpxml(scenario_sample=...)`, which applies them
+/// after the pairing check). The patch targets' application is the
 /// Rust surface's (`hares_core::scenario::apply_sample`): the record
 /// `sample` returns carries the sampled patch values (the values and
 /// their targets) and there is deliberately no Python apply binding.
@@ -180,6 +225,28 @@ impl PyScenarioSpec {
             PyValueError::new_err(format!("the sample does not serialize: {err}"))
         })?;
         Python::attach(|py| json_to_python(py, json))
+    }
+
+    /// The home's sampled scenario as the pairing handle: the same record
+    /// `sample` returns, carrying the draw key it ran under, so the
+    /// dwelling constructor can refuse to apply it to a home whose
+    /// behavioral draws key on another (master seed, scenario, building).
+    /// The handle's `overrides()` is the constructor's `overrides=` form,
+    /// applied through `from_hpxml(scenario_sample=...)`'s pairing check.
+    pub fn sample_record(
+        &self,
+        master_seed: u64,
+        scenario_id: u64,
+        bldg_id: i64,
+    ) -> PyResult<PyScenarioSample> {
+        let sample = self
+            .inner
+            .sample(master_seed, scenario_id, bldg_id)
+            .map_err(spec_error)?;
+        Ok(PyScenarioSample {
+            master_seed,
+            sample,
+        })
     }
 
     /// The home's sampled scenario in the overrides form the dwelling

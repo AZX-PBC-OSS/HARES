@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use chrono::Datelike;
 
-use hares_types::{HaresError, ZoneId, normalize_ascii};
+use hares_types::{EquipmentId, HaresError, ZoneId, normalize_ascii};
 
 use crate::telemetry::{DwellingTelemetry, ObservationWarnOnce};
 
@@ -62,11 +62,18 @@ pub(crate) enum ObservationKind {
         id: ZoneId,
         position: usize,
     },
+    /// The equipment at `position` in dwelling order, bound to the
+    /// descriptor's never-reused `id`: the snapshot executor reads the
+    /// position (the snapshot's roster is frozen at capture), the live
+    /// dwelling executor resolves the id so a roster change can never
+    /// shift a planned field onto another unit.
     EquipmentSoc {
-        index: usize,
+        id: EquipmentId,
+        position: usize,
     },
     EquipmentPower {
-        index: usize,
+        id: EquipmentId,
+        position: usize,
     },
     TimeSin,
     TimeCos,
@@ -102,11 +109,11 @@ pub(crate) enum ObservationKind {
 
 /// The names a plan resolves against: the zone names in the sorted-zone-id
 /// order the telemetry reports (each with its id), the equipment names in
-/// dwelling order, and the actors' published channels in the sorted-name
-/// order the telemetry map reports.
+/// dwelling order (each with its never-reused id), and the actors'
+/// published channels in the sorted-name order the telemetry map reports.
 pub(crate) struct ObservationSurface {
     pub zone_names: Vec<(String, ZoneId)>,
-    pub equipment_names: Vec<String>,
+    pub equipment: Vec<(String, EquipmentId)>,
     pub actors: Vec<(String, Vec<String>)>,
 }
 
@@ -149,11 +156,11 @@ impl ObservationPlan {
             .enumerate()
             .map(|(idx, (name, _))| (normalize_ascii(name), idx))
             .collect();
-        let equip_positions: HashMap<String, usize> = surface
-            .equipment_names
+        let equip_positions: HashMap<String, (usize, EquipmentId)> = surface
+            .equipment
             .iter()
             .enumerate()
-            .map(|(idx, name)| (normalize_ascii(name), idx))
+            .map(|(idx, (name, id))| (normalize_ascii(name), (idx, *id)))
             .collect();
         let actor_channels: BTreeMap<&str, &Vec<String>> = surface
             .actors
@@ -222,11 +229,14 @@ fn resolve_field(
     field: &str,
     surface: &ObservationSurface,
     zone_positions: &HashMap<String, usize>,
-    equip_positions: &HashMap<String, usize>,
+    equip_positions: &HashMap<String, (usize, EquipmentId)>,
     actor_channels: &BTreeMap<&str, &Vec<String>>,
     warned: &mut ObservationWarnOnce,
 ) -> Result<ObservationKind, HaresError> {
-    if field == "outdoor_temp" {
+    // The outdoor temperature's two spellings: the plan's canonical key
+    // and the telemetry dict's `outdoor_temp_c`, which the bounds table
+    // and the step dicts both carry. One resolution, the same value.
+    if field == "outdoor_temp" || field == "outdoor_temp_c" {
         return Ok(ObservationKind::OutdoorTemp);
     }
     if field == "outdoor_humidity_ratio" {
@@ -271,22 +281,22 @@ fn resolve_field(
         return resolved.map(|(id, position)| ObservationKind::ZoneEnergyBalance { id, position });
     }
     if let Some(name) = bracket_name(field, "equipment_soc") {
-        return equip_position(&normalize_ascii(name), equip_positions, field)
-            .map(|index| ObservationKind::EquipmentSoc { index });
+        return equip_binding(&normalize_ascii(name), equip_positions, field)
+            .map(|(id, position)| ObservationKind::EquipmentSoc { id, position });
     }
     if let Some(name) = bracket_name(field, "equipment_power") {
-        return equip_position(&normalize_ascii(name), equip_positions, field)
-            .map(|index| ObservationKind::EquipmentPower { index });
+        return equip_binding(&normalize_ascii(name), equip_positions, field)
+            .map(|(id, position)| ObservationKind::EquipmentPower { id, position });
     }
 
     // Flat aliases used in architecture docs for single-instance cases.
     if field == "battery_soc" {
         return single_instance_alias(equip_positions, "Battery", field)
-            .map(|index| ObservationKind::EquipmentSoc { index });
+            .map(|(id, position)| ObservationKind::EquipmentSoc { id, position });
     }
     if field == "ev_soc" {
         return single_instance_alias(equip_positions, "Electric Vehicle", field)
-            .map(|index| ObservationKind::EquipmentSoc { index });
+            .map(|(id, position)| ObservationKind::EquipmentSoc { id, position });
     }
 
     // Temporal encoding: sin/cos of fractional hour for diurnal RL patterns.
@@ -356,6 +366,20 @@ fn resolve_field(
     )))
 }
 
+/// Resolves an equipment bracket name to the binding the plan freezes: the
+/// unit's position in dwelling order and its never-reused id.
+fn equip_binding(
+    name: &str,
+    equip_positions: &HashMap<String, (usize, EquipmentId)>,
+    field: &str,
+) -> Result<(EquipmentId, usize), HaresError> {
+    equip_positions
+        .get(name)
+        .copied()
+        .ok_or_else(|| HaresError::Control(format!("unknown equipment in field `{field}`")))
+        .map(|(position, id)| (id, position))
+}
+
 fn zone_position(
     name: &str,
     zone_positions: &HashMap<String, usize>,
@@ -367,17 +391,6 @@ fn zone_position(
         .ok_or_else(|| HaresError::Control(format!("unknown zone in field `{field}`")))
 }
 
-fn equip_position(
-    name: &str,
-    equip_positions: &HashMap<String, usize>,
-    field: &str,
-) -> Result<usize, HaresError> {
-    equip_positions
-        .get(name)
-        .copied()
-        .ok_or_else(|| HaresError::Control(format!("unknown equipment in field `{field}`")))
-}
-
 fn bracket_name<'a>(field: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{key}[");
     field
@@ -386,12 +399,12 @@ fn bracket_name<'a>(field: &'a str, key: &str) -> Option<&'a str> {
 }
 
 fn single_instance_alias(
-    equip_positions: &HashMap<String, usize>,
+    equip_positions: &HashMap<String, (usize, EquipmentId)>,
     canonical_name: &str,
     field: &str,
-) -> Result<usize, HaresError> {
-    if let Some(&idx) = equip_positions.get(&normalize_ascii(canonical_name)) {
-        return Ok(idx);
+) -> Result<(EquipmentId, usize), HaresError> {
+    if let Some(&(position, id)) = equip_positions.get(&normalize_ascii(canonical_name)) {
+        return Ok((id, position));
     }
     Err(HaresError::Control(format!(
         "field `{field}` alias requires `{canonical_name}` equipment"
@@ -475,8 +488,8 @@ fn telemetry_read(
         ObservationKind::ZoneEnergyBalance { position, .. } => {
             telemetry.energy_balance_residuals[*position]
         }
-        ObservationKind::EquipmentSoc { index } => telemetry.equipment_soc[*index],
-        ObservationKind::EquipmentPower { index } => telemetry.equipment_power_w[*index],
+        ObservationKind::EquipmentSoc { position, .. } => telemetry.equipment_soc[*position],
+        ObservationKind::EquipmentPower { position, .. } => telemetry.equipment_power_w[*position],
         ObservationKind::TimeSin => time_feature(telemetry, false),
         ObservationKind::TimeCos => time_feature(telemetry, true),
         ObservationKind::ScheduleRow => telemetry.schedule_row.map_or(f64::NAN, |row| row as f64),
