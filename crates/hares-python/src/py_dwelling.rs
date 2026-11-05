@@ -1209,6 +1209,20 @@ impl PyDwelling {
         Ok(())
     }
 
+    /// Records the scenario script driving the run for its provenance:
+    /// the script's declared name and the 64 char lowercase hex SHA-256
+    /// digest over its content (the form ``Provenance.script`` renders).
+    /// The scenario engine calls this once, at the first applied event;
+    /// the script's content stays the caller's to hold.
+    pub fn record_script(&self, name: &str, sha256: &str) -> PyResult<()> {
+        let digest = hares_input::input::unhex(sha256).map_err(|reason| {
+            PyValueError::new_err(format!("record_script: the SHA-256 digest {reason}"))
+        })?;
+        let mut dwelling = self.acquire()?;
+        dwelling.record_script(name, digest);
+        Ok(())
+    }
+
     pub fn set_grid_voltage(&self, voltage_pu: f64) -> PyResult<()> {
         // Loud on non-finite per-unit voltage at the boundary (the
         // shared validators' section rationale, `utils.rs`): a NaN

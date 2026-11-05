@@ -3387,6 +3387,12 @@ class Dwelling:
         overwrite the stored ones and the absent fields preserve them, so
         a partial dict wipes nothing. An unknown key and a dict naming no
         field are refused, as are non-finite values."""
+    def record_script(self, name: str, sha256: str) -> None:
+        """Records the scenario script driving the run for its provenance:
+        the script's declared name and the 64 char lowercase hex SHA-256
+        digest over its content (the form ``Provenance.script`` renders).
+        The scenario engine calls this once, at the first applied event;
+        the script's content stays the caller's to hold."""
     def set_grid_voltage(self, voltage_pu: float) -> None: ...
     def set_frequency(self, frequency_hz: float) -> None: ...
     def take_warnings(self) -> list[str]: ...

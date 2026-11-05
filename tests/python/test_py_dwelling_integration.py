@@ -5,6 +5,7 @@ injection → stepping → metrics extraction → checkpoint/restore. Also inclu
 GIL safety stress tests for batch_step.
 """
 
+import hashlib
 import math
 import threading
 from array import array
@@ -386,6 +387,27 @@ class TestPriceAndGridVoltage:
         dw = _init_dwelling()
         with pytest.raises(ValueError, match="no price field"):
             dw.set_price_signal({})
+
+    def test_record_script_lands_in_the_runs_provenance(self):
+        """The scenario engine records its driver through the dwelling's
+        own surface: the declared name and the SHA-256 digest over the
+        script's content. The provenance getter renders the digest as the
+        hex the setter accepts, so a run names its driver end to end."""
+        dw = _init_dwelling()
+        content = b"voltage_pu: 0.6 at t=900\n"
+        digest = hashlib.sha256(content).hexdigest()
+        dw.record_script("grid-event-study", digest)
+        dw.step()
+        result = dw.finish()
+        assert result.provenance.script == {
+            "name": "grid-event-study",
+            "sha256": digest,
+        }
+
+    def test_record_script_refuses_a_malformed_digest(self):
+        dw = _init_dwelling()
+        with pytest.raises(ValueError, match="SHA-256 digest"):
+            dw.record_script("grid-event-study", "not-a-digest")
 
     def test_set_grid_voltage(self):
         dw = _init_dwelling()
