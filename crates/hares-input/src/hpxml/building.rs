@@ -585,6 +585,13 @@ fn duplicated_attribute_name(tag: &BytesStart<'_>, offset: usize) -> Option<Stri
     (end > 0).then(|| rest[..end].to_string())
 }
 
+/// The maximum element nesting the parser builds. The HPXML schema's
+/// realistic depth is around ten; 64 is that with generous headroom. A
+/// document nested past the cap is refused with a typed error instead of
+/// building a tree whose recursive drop (and any recursive consumer)
+/// overflows the thread stack and aborts the process.
+const MAX_ELEMENT_DEPTH: usize = 64;
+
 pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -598,6 +605,20 @@ pub fn parse_xml_document(xml: &str) -> Result<XmlNode, HpxmlError> {
             Ok(Event::Start(tag)) => {
                 let name = normalize_name(tag.name().as_ref());
                 let attrs = parse_attributes(xml, &tag, reader.buffer_position() as usize)?;
+                if stack.len() >= MAX_ELEMENT_DEPTH {
+                    let pos = reader.buffer_position() as usize;
+                    let (line, col) = byte_to_line_col(xml, pos);
+                    return Err(HpxmlError::Parse(ParseError {
+                        message: format!(
+                            "element nesting exceeds the parser's depth cap of \
+                             {MAX_ELEMENT_DEPTH} at <{name}>"
+                        ),
+                        byte_offset: pos,
+                        line,
+                        column: col,
+                        element_name: Some(name.clone()),
+                    }));
+                }
                 stack.push(XmlNode {
                     name,
                     attrs,
@@ -4082,6 +4103,27 @@ mod tests {
             .child(&TEXT)
             .expect("the text element must be in the tree");
         assert_eq!(text.text, "a\nb");
+    }
+
+    /// Nesting past the parser's depth cap is a typed parse error naming
+    /// the depth and the element, never the tree's recursive drop
+    /// overflowing the thread stack: a generated document a few hundred
+    /// kilobytes deep must come back as an error, not abort the process.
+    #[test]
+    fn deeply_nested_document_is_a_typed_error_not_a_crash() {
+        let depth = 100_000;
+        let xml = format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
+        let err = parse_xml_document(&xml)
+            .expect_err("nesting past the depth cap must fail the parse");
+        let shown = format!("{err}");
+        assert!(
+            shown.contains("depth"),
+            "the error names the depth: {shown}"
+        );
+        assert!(
+            shown.contains('a'),
+            "the error names the element: {shown}"
+        );
     }
 
     /// An attribute the reader rejects (a duplicated name) or a value it

@@ -637,7 +637,7 @@ impl TariffEvaluator {
         let period_end = self.billing_state.period_end;
         let segments = period_month_segments(period_start, period_end)?;
 
-        let demand_charge = self.compute_demand_charge(&segments);
+        let demand_charge = self.compute_demand_charge(&segments)?;
 
         let days_in_period = (period_end - period_start).num_days() as f64;
         let fixed_charge = self.tariff.fixed_charges.monthly_usd
@@ -785,7 +785,11 @@ impl TariffEvaluator {
     /// season bills every season's rate for the days it covers. A
     /// single-month period's shares are 1.0 and the arithmetic is the
     /// single-month filter's, unchanged.
-    fn compute_demand_charge(&self, segments: &[(u8, f64)]) -> f64 {
+    ///
+    /// # Errors
+    ///
+    /// A demand rate whose period the evaluator's own name table lacks.
+    fn compute_demand_charge(&self, segments: &[(u8, f64)]) -> Result<f64, HaresError> {
         let split = self.tariff.seasonal_split.as_ref();
         let mut total = 0.0;
         for (month, share) in segments {
@@ -799,12 +803,19 @@ impl TariffEvaluator {
                     // Coincident demand: use each rate's own ratchet, not a global one.
                     None => self.billing_state.effective_peak_with_ratchet(&dr.ratchet),
                     Some(name) => {
-                        let idx = self
+                        let Some(idx) = self
                             .period_name_table
                             .iter()
                             .position(|n| n == name)
-                            .expect("demand period name not in table -- validate() should have caught this")
-                            as u16;
+                        else {
+                            return Err(HaresError::Tariff(format!(
+                                "demand rate's period '{name}' is not in the evaluator's \
+                                 period name table [{}]: the rate's period must be a \
+                                 declared TOU period the table interned",
+                                self.period_name_table.join(", ")
+                            )));
+                        };
+                        let idx = idx as u16;
                         self.billing_state
                             .effective_peak_for_period(idx, &dr.ratchet)
                     }
@@ -820,7 +831,7 @@ impl TariffEvaluator {
         // floats (rustc 1.94 emits -0.0 here): adding the positive zero
         // pins the sign (+0.0 + -0.0 = +0.0) without touching any other
         // value, so the summary's bits do not depend on the toolchain.
-        total + 0.0
+        Ok(total + 0.0)
     }
 
     /// The tiered-block energy charge over the closed period's month
@@ -865,7 +876,7 @@ impl TariffEvaluator {
             self.billing_state.period_start(),
             self.billing_state.period_end(),
         )?;
-        let demand_charge = self.compute_demand_charge(&segments);
+        let demand_charge = self.compute_demand_charge(&segments)?;
 
         let current_time = self.simulation_start
             + Duration::seconds(self.step_index as i64 * self.interval_seconds as i64);
@@ -958,7 +969,7 @@ impl TariffEvaluator {
             self.billing_state.period_start(),
             self.billing_state.period_end(),
         )?;
-        let demand_charge = self.compute_demand_charge(&segments);
+        let demand_charge = self.compute_demand_charge(&segments)?;
 
         // Clamp to period end in case sim_end exceeds the billing period
         // boundary.
@@ -3637,4 +3648,43 @@ mod tests {
         );
     }
 
+
+    // A demand rate whose period name the evaluator's own table lacks is
+    // a typed error naming the rate, not an expect panic on the lookup.
+    #[test]
+    fn the_demand_charge_names_a_foreign_period_rate_instead_of_panicking() {
+        let mut tariff = flat_tariff(0.15);
+        tariff.demand_rates = vec![crate::types::DemandRate {
+            period_name: Some("flat".into()),
+            season: SeasonFilter::All,
+            rate_per_kw: 5.0,
+            ratchet: None,
+        }];
+        let start = New_York.with_ymd_and_hms(2025, 7, 7, 0, 0, 0).unwrap();
+        let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
+        // The construction path interns every declared rate's name; a
+        // name that is not in the table must be reported, whatever
+        // future construction paths do.
+        ev.tariff.demand_rates[0].period_name = Some("not-interned".into());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ev.compute_demand_charge(&[(7, 1.0)])
+        }));
+        let reported = match outcome {
+            Ok(reported) => reported,
+            Err(payload) => panic!(
+                "the demand-charge resolver panicked on a foreign period name: {}",
+                payload
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("?")
+            ),
+        };
+        let message = format!("{reported:?}");
+        assert!(
+            message.contains("not-interned"),
+            "the demand-charge resolver must report the foreign rate as a \
+             typed error naming it, got: {message}"
+        );
+    }
 }
