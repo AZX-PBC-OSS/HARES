@@ -138,7 +138,7 @@ fn billing_totals_accumulate_in_si() {
         .expect("the tariff attaches");
 
     while dwelling.step().is_ok() {}
-    dwelling.finalize_billing();
+    dwelling.finalize_billing().expect("the finalize resolves");
 
     // The evaluator's live state at the run's end holds the second (open)
     // period's accruals; the closed summaries were computed from the same

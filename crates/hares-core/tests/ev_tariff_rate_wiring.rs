@@ -199,7 +199,7 @@ fn ev_tou_period_name_changes_the_dwelling_bill() {
             .set_tariff(tariff_with_ev_rate(ev_rate), chrono_tz::Etc::UTC)
             .expect("the tariff attaches");
         let ev_kwh = ev_charged_kwh(&mut dwelling, steps);
-        dwelling.finalize_billing();
+        dwelling.finalize_billing().expect("the finalize resolves");
         let summaries = dwelling.billing_summaries();
         assert_eq!(summaries.len(), 1, "the finalize closes the run's period");
         (

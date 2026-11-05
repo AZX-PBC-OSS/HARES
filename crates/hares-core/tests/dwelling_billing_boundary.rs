@@ -113,7 +113,7 @@ fn dwelling_billing_boundary_step_belongs_to_its_own_month() {
         let result = dwelling.step().expect("the boundary run steps");
         import_j.push(result.net_electric_power_w.max(0.0) * dt_secs);
     }
-    dwelling.finalize_billing();
+    dwelling.finalize_billing().expect("the finalize resolves");
 
     let summaries = dwelling.billing_summaries();
     assert_eq!(
