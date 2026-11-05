@@ -500,15 +500,46 @@ pub(crate) fn finite_f64_optional(d: &Bound<'_, PyDict>, key: &str) -> PyResult<
     Ok(v)
 }
 
+/// The price signal dict's three field names.
+const PRICE_SIGNAL_KEYS: &[&str] = &["electricity_price", "export_price", "ghg_intensity"];
+
 /// Reads the price signal's three fields (`electricity_price`,
 /// `export_price`, `ghg_intensity`) from the caller's dict as a partial
 /// signal: an absent or `None` field stays `None`, which the engine's
 /// per-field update reads as "not named, preserve the stored one". Every
 /// price-signal dict on the Python surface (the single dwelling's
 /// `set_price_signal`, the fleet's `update_price_signal_all`) routes
-/// through here, so the partial-update semantics and the finiteness
-/// guard are one behavior.
+/// through here, so the partial-update semantics, the finiteness guard
+/// and the key contract are one behavior.
 pub(crate) fn price_signal_from_dict(d: &Bound<'_, PyDict>) -> PyResult<PriceSignal> {
+    // The key contract: every key must name one of the three fields. A
+    // misspelled key (a `ghg` beside the intended `ghg_intensity`) is the
+    // silent-drop class: the caller's value never lands and nothing says
+    // so. A dict naming none of the fields applies nothing; it is
+    // refused for the same reason rather than recorded as a no-op
+    // application.
+    let mut named = 0usize;
+    for (key, _value) in d.iter() {
+        let key: String = key.extract().map_err(|_| {
+            PyValueError::new_err(
+                "set_price_signal: the dict's keys are the price signal's field names \
+                 (electricity_price, export_price, ghg_intensity), not a non-string key",
+            )
+        })?;
+        if !PRICE_SIGNAL_KEYS.contains(&key.as_str()) {
+            return Err(PyValueError::new_err(format!(
+                "set_price_signal: the key '{key}' is not one of the price signal's fields \
+                 (electricity_price, export_price, ghg_intensity)"
+            )));
+        }
+        named += 1;
+    }
+    if named == 0 {
+        return Err(PyValueError::new_err(
+            "set_price_signal: the dict names no price field (electricity_price, \
+             export_price, ghg_intensity): nothing to apply",
+        ));
+    }
     Ok(PriceSignal {
         electricity_price: finite_f64_optional(d, "electricity_price")?,
         export_price: finite_f64_optional(d, "export_price")?,

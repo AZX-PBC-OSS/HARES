@@ -370,6 +370,23 @@ class TestPriceAndGridVoltage:
             "the export-only update preserves the stored GHG intensity"
         )
 
+    def test_unknown_price_key_is_refused(self):
+        """A misspelled key is the silent-drop class: refused, naming it.
+        The red state at the parent ignored every unknown key, so a
+        typo'd ``ghg`` dropped the carbon intensity silently and a
+        wrong-keyed dict stored an all-``None`` signal, clearing the
+        active price."""
+        dw = _init_dwelling()
+        with pytest.raises(ValueError, match="ghg"):
+            dw.set_price_signal({"electricity_price": 0.2, "ghg": 0.4})
+
+    def test_empty_price_dict_is_refused(self):
+        """A dict naming no field applies nothing; it is refused rather
+        than recorded as a no-op application."""
+        dw = _init_dwelling()
+        with pytest.raises(ValueError, match="no price field"):
+            dw.set_price_signal({})
+
     def test_set_grid_voltage(self):
         dw = _init_dwelling()
         dw.set_grid_voltage(1.05)
