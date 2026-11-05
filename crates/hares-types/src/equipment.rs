@@ -1144,46 +1144,51 @@ fn validate_positive_if_present(name: &str, v: Option<usize>) -> Result<(), crat
 
 /// Electrical power measurement for equipment output.
 ///
-/// All values must be finite and non-negative for Consumption and Generation.
+/// The unit is watts (SI) on every variant, the unit every producer
+/// passes and every consumer reads (`net_consumption_w`, the telemetry
+/// field `equipment_power_w`): a load that draws 1 kW publishes
+/// `Consumption(1000.0)`. All values must be finite and non-negative for
+/// Consumption and Generation.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ElectricPower {
-    /// Net power consumed from the grid (kW). Must be >= 0.
+    /// Net power consumed from the grid (W). Must be >= 0.
     Consumption(f64),
-    /// Net power generated/exported to the grid (kW). Must be >= 0.
+    /// Net power generated/exported to the grid (W). Must be >= 0.
     Generation(f64),
-    /// Bidirectional power (kW). Positive = consuming, negative = generating.
+    /// Bidirectional power (W). Positive = consuming, negative = generating.
     Bidirectional(f64),
 }
 
 impl ElectricPower {
-    pub fn consumption(kw: f64) -> Result<Self, HaresError> {
-        if !kw.is_finite() || kw < 0.0 {
+    pub fn consumption(w: f64) -> Result<Self, HaresError> {
+        if !w.is_finite() || w < 0.0 {
             return Err(HaresError::Equipment(format!(
-                "ElectricPower::Consumption requires finite non-negative value, got {kw}"
+                "ElectricPower::Consumption requires finite non-negative value, got {w}"
             )));
         }
-        Ok(Self::Consumption(kw))
+        Ok(Self::Consumption(w))
     }
 
-    pub fn generation(kw: f64) -> Result<Self, HaresError> {
-        if !kw.is_finite() || kw < 0.0 {
+    pub fn generation(w: f64) -> Result<Self, HaresError> {
+        if !w.is_finite() || w < 0.0 {
             return Err(HaresError::Equipment(format!(
-                "ElectricPower::Generation requires finite non-negative value, got {kw}"
+                "ElectricPower::Generation requires finite non-negative value, got {w}"
             )));
         }
-        Ok(Self::Generation(kw))
+        Ok(Self::Generation(w))
     }
 
-    pub fn bidirectional(kw: f64) -> Result<Self, HaresError> {
-        if !kw.is_finite() {
+    pub fn bidirectional(w: f64) -> Result<Self, HaresError> {
+        if !w.is_finite() {
             return Err(HaresError::Equipment(format!(
-                "ElectricPower::Bidirectional requires finite value, got {kw}"
+                "ElectricPower::Bidirectional requires finite value, got {w}"
             )));
         }
-        Ok(Self::Bidirectional(kw))
+        Ok(Self::Bidirectional(w))
     }
 
-    /// Net consumption in kW. Generation is negative, bidirectional follows sign.
+    /// Net consumption in W (watts): generation is negative, bidirectional
+    /// follows sign.
     pub fn net_consumption_w(&self) -> f64 {
         match self {
             Self::Consumption(v) => *v,

@@ -1818,6 +1818,18 @@ impl PyDwelling {
         Ok(())
     }
 
+    /// Refuses, changing nothing, a control signal the dwelling's
+    /// equipment would refuse when it is applied (the equipment missing,
+    /// the capability absent, the state rejecting it): the queue-time
+    /// acceptance check the batch step runs before any action applies,
+    /// exposed for the Python step paths that dispatch themselves.
+    pub fn check_control(&self, equipment: String, signal: &PyControlSignal) -> PyResult<()> {
+        let dwelling = self.acquire()?;
+        dwelling
+            .check_control(&equipment, &signal.signal)
+            .map_err(to_py_err)
+    }
+
     /// Replace equipment by name with a new equipment config object (Battery, PV, or EV).
     ///
     /// Actors bound to the replaced name stay and drive the replacement

@@ -15,6 +15,7 @@ import numpy as np
 
 from hares._hares import Dwelling as PyDwelling
 from hares._hares import batch_step as _extension_batch_step
+from hares._hares import clip_action
 
 try:
     from gymnasium import spaces
@@ -46,7 +47,9 @@ from .gym_env import (
     observation_field_bounds,
     sorted_action_layout,
     validate_episode_length,
+    validate_reward_fn,
     validated_auto_reset,
+    validated_bounds_overrides,
     validated_observation_fields,
     validated_reset_seed,
     validated_seed_sequence,
@@ -89,6 +92,12 @@ def _reward_context(step_data: StepResult, dwelling: PyDwelling) -> RewardContex
     )
 
 
+def _default_reward(step_data: StepResult) -> float:
+    """The default reward, the single env's: minus the step's net electric
+    power in kW, converted once from the step dict's watts."""
+    return -float(step_data["net_electric_power_w"]) / 1000.0
+
+
 class VecDwellingGymEnv(_VectorEnvBase):
     """The fleet's vector environment, a Gymnasium `VectorEnv` when
     Gymnasium is installed: the standard vector wrappers accept it, the
@@ -100,7 +109,7 @@ class VecDwellingGymEnv(_VectorEnvBase):
         dwellings: Sequence[PyDwelling],
         observation_fields: Sequence[str],
         action_space_config: Mapping[str, Sequence[str]],
-        reward_fn: Callable[[RewardContext], float],
+        reward_fn: Callable[[RewardContext], float] | None,
         episode_length: timedelta,
         time_res_s: float | None = None,
         field_bounds_overrides: Mapping[str, tuple[float, float]] | None = None,
@@ -108,12 +117,16 @@ class VecDwellingGymEnv(_VectorEnvBase):
         auto_reset: object = False,
         seed_sequence: object = None,
     ) -> None:
+        """The reward contract is the single env's: a callable over the
+        ``RewardContext`` or ``None`` for the default (minus the step's
+        net electric power in kW, converted once from the context's
+        watts), the same default and the same unit on both step paths, so
+        one fixture's two paths reward bitwise equally."""
         self._observation_fields = validated_observation_fields(observation_fields)
-        if not callable(reward_fn):
-            raise TypeError(
-                f"reward_fn must be callable, got {type(reward_fn).__name__}"
-            )
+        validate_reward_fn(reward_fn)
         validate_episode_length(episode_length)
+        validated_bounds_overrides(field_bounds_overrides, self._observation_fields)
+        self._reward_fn = reward_fn
         self._auto_reset = validated_auto_reset(auto_reset)
         seed_sequence = validated_seed_sequence(seed_sequence)
 
@@ -406,22 +419,41 @@ class VecDwellingGymEnv(_VectorEnvBase):
             infos[idx]["initial_observation_mask"] = ~np.isfinite(obs[idx])
         return obs.astype(np.float64, copy=False), infos
 
+    def _reward_for(self, step_data: StepResult, dwelling: PyDwelling) -> float:
+        """The step's reward: the caller's callable over the context, or
+        the default (minus the net power in kW) when no callable was
+        given. The telemetry dicts are built only for a callable that
+        reads them, the same economy the single env's step keeps."""
+        if self._reward_fn is None:
+            return _default_reward(step_data)
+        return float(self._reward_fn(_reward_context(step_data, dwelling)))
+
     def _apply_actions(self, dwelling: PyDwelling, action: np.ndarray) -> None:
-        """Clip one dwelling's action row to the layout's per-column bounds
-        and apply it as control signals, equipment by sorted name: the same
-        clip-and-dispatch the extension's ``batch_step`` runs."""
-        clipped = np.clip(action, self._action_low, self._action_high)
+        """One dwelling's action row through the batch path's own two
+        helpers: the extension's ``clip_action`` (the clip counted on the
+        acting dwelling's run health, in every build) and the queue-time
+        acceptance check (a signal the equipment would refuse is refused
+        here, before anything applies), then the dispatch by sorted name —
+        the same clip-and-check-and-dispatch ``batch_step`` runs, so the
+        two step paths share one health contract."""
+        values = clip_action(
+            dwelling, [float(value) for value in action], self._action_layout
+        )
         action_values: dict[str, dict[str, float]] = {}
-        for col, (equipment, field) in enumerate(self._action_layout):
-            action_values.setdefault(equipment, {})[field] = float(clipped[col])
+        for (equipment, field), value in zip(self._action_layout, values, strict=True):
+            action_values.setdefault(equipment, {})[field] = value
+        signals: list[tuple[str, Any]] = []
         for equipment in sorted(action_values):
-            dwelling.apply_control(
-                equipment,
-                build_control_signal(
-                    self._signal_type_by_equipment[equipment],
-                    action_values[equipment],
-                ),
+            signal = build_control_signal(
+                self._signal_type_by_equipment[equipment],
+                action_values[equipment],
             )
+            # Queue-time acceptance: the same refusal the batch path
+            # raises, before any signal reaches any equipment.
+            dwelling.check_control(equipment, signal)
+            signals.append((equipment, signal))
+        for equipment, signal in signals:
+            dwelling.apply_control(equipment, signal)
 
     # The infos slot is the documented divergence from the base class's
     # batch-dict shape: every row is one env's own dict, the shape the
@@ -439,9 +471,12 @@ class VecDwellingGymEnv(_VectorEnvBase):
         present) and ``"warnings"`` (list[str], present only when the count
         is non-zero, the warnings drained from that dwelling during the
         step, e.g. control signals rejected at dispatch time). Both step
-        paths clip actions to the declared bounds and call ``reward_fn``
-        per environment on the same ``RewardContext`` built from the step
-        dict and the dwelling's telemetry: one reward contract.
+        paths clip actions through the same counted clip and run the same
+        queue-time acceptance check, and both reward per environment: the
+        caller's ``reward_fn`` over the same ``RewardContext`` built from
+        the step dict and the dwelling's telemetry, or, for ``reward_fn=None``,
+        the same default the single env pays (minus the net power in kW).
+        One reward contract, one health contract.
 
         With ``auto_reset`` set, an env whose episode ended (terminated or
         truncated) resets alone before the step returns: its observation
@@ -486,9 +521,7 @@ class VecDwellingGymEnv(_VectorEnvBase):
                     # the 0.0 a failed step has always reported.
                     rewards.append(0.0)
                 else:
-                    rewards.append(
-                        float(self._reward_fn(_reward_context(step_data, dwelling)))
-                    )
+                    rewards.append(self._reward_for(step_data, dwelling))
                 dones.append(bool(row["terminated"]))
                 truncs.append(bool(row["truncated"]))
                 info = dict(row.get("info", {}))
@@ -504,7 +537,7 @@ class VecDwellingGymEnv(_VectorEnvBase):
                 # same buffer: the two paths read the same values by
                 # construction.
                 dwelling.observe_into(plans[idx], self._obs_buffer[idx])
-                rewards.append(float(self._reward_fn(_reward_context(step_data, dwelling))))
+                rewards.append(self._reward_for(step_data, dwelling))
                 dones.append(False)
                 truncs.append(False)
                 warning_count, warning_messages = drain_step_warnings(dwelling)

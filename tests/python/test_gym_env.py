@@ -543,14 +543,16 @@ def test_rust_and_python_paths_give_identical_rewards(
 
 
 def test_vec_env_rejects_a_non_callable_reward_fn_at_construction():
-    """A reward_fn that is not callable fails at construction, naming the
-    field, before any dwelling is initialized or advanced."""
+    """A reward_fn that is not callable and not None fails at
+    construction, naming the field, before any dwelling is initialized or
+    advanced; None is the default reward's own form now (the same default
+    the single env pays, pinned bitwise equal across the paths)."""
     with pytest.raises(TypeError, match="reward_fn"):
         VecDwellingGymEnv(
             dwellings=[_make_dwelling()],
             observation_fields=_OBS_FIELDS,
             action_space_config=_ACTION_CONFIG,
-            reward_fn=cast(Any, None),
+            reward_fn=cast(Any, "not a reward"),
             episode_length=timedelta(minutes=5),
         )
 
@@ -2665,3 +2667,225 @@ def test_vec_env_accepts_the_standard_episode_statistics_wrapper():
         assert isinstance(info, dict) and "warning_count" in info
     env.close()
     assert env.unwrapped.closed
+
+
+# ---------------------------------------------------------------------------
+# The parity contract of the two step paths: the clamp accounting, the run
+# health, the refused action and the default reward are one contract on
+# both paths; the bounds overrides and the reset seed are validated before
+# anything is touched.
+# ---------------------------------------------------------------------------
+
+
+def test_both_step_paths_share_the_clamp_and_health_contract():
+    """The Python fallback's clamp accounting and queue-time acceptance are
+    the batch path's: an out-of-bounds action is clipped and counted on the
+    acting dwelling's run health, and a signal the equipment would refuse
+    is refused before anything applies, on both paths."""
+    actions_in_band = np.full((2, 1), 200.0, dtype=np.float64)  # far above the band
+    clamped_counts = []
+    rejected = []
+    for rust_path in (True, False):
+        import hares.rl.vec_env as vec_module
+
+        previous = vec_module.rust_batch_step
+        vec_module.rust_batch_step = (
+            vec_module._extension_batch_step if rust_path else None
+        )
+        try:
+            dwellings = [_make_dwelling(seed=0), _make_dwelling(seed=0)]
+            env = VecDwellingGymEnv(
+                dwellings=dwellings,
+                observation_fields=_OBS_FIELDS,
+                action_space_config=_ACTION_CONFIG,
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=timedelta(minutes=5),
+            )
+            env.reset(seed=0)
+            _obs, _rewards, _d, _t, _i = env.step(actions_in_band)
+            counts = [
+                dwelling.health().clamped_actions for dwelling in dwellings
+            ]
+            clamped_counts.append(counts)
+        finally:
+            vec_module.rust_batch_step = previous
+    assert clamped_counts[0] == clamped_counts[1], (
+        f"the clamp count is the same on both paths: {clamped_counts}"
+    )
+    assert clamped_counts[0][0] == 1, (
+        f"the out-of-band action is counted once on the acting dwelling: {clamped_counts[0]}"
+    )
+
+    # A signal the equipment would refuse: the refusal is the caller's
+    # error on both paths, before any dwelling is touched.
+    for rust_path in (True, False):
+        import hares.rl.vec_env as vec_module
+
+        previous = vec_module.rust_batch_step
+        vec_module.rust_batch_step = (
+            vec_module._extension_batch_step if rust_path else None
+        )
+        try:
+            dwellings = [_make_dwelling(seed=0), _make_dwelling(seed=0)]
+            env = VecDwellingGymEnv(
+                dwellings=dwellings,
+                observation_fields=_OBS_FIELDS,
+                action_space_config=_ACTION_CONFIG,
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=timedelta(minutes=5),
+            )
+            env.reset(seed=0)
+            # A missing target equipment: the signal names an equipment
+            # the dwelling does not carry.
+            env._action_layout = [("No Such Equipment", "heat_c")]
+            env._signal_type_by_equipment = {"No Such Equipment": "ThermalSetpoint"}
+            env._action_dim = 1
+            with pytest.raises(Exception, match="No Such Equipment"):
+                env.step(np.full((2, 1), 21.0, dtype=np.float64))
+            rejected.append(
+                [dwelling.health().rejected_control_signals for dwelling in dwellings]
+            )
+        finally:
+            vec_module.rust_batch_step = previous
+    assert rejected[0] == rejected[1] == [0, 0], (
+        f"the refused action reaches no dwelling on either path: {rejected}"
+    )
+
+
+def test_the_default_reward_is_bitwise_equal_across_paths_and_envs():
+    """`reward_fn=None` pays the same default on the single env and on
+    both vec paths: minus the step's net power in kW, on bits, one
+    fixture."""
+    dwellings = [_make_dwelling(seed=0), _make_dwelling(seed=0)]
+    vec_rewards = []
+    for rust_path in (True, False):
+        import hares.rl.vec_env as vec_module
+
+        previous = vec_module.rust_batch_step
+        vec_module.rust_batch_step = (
+            vec_module._extension_batch_step if rust_path else None
+        )
+        try:
+            env = VecDwellingGymEnv(
+                dwellings=[_make_dwelling(seed=0), _make_dwelling(seed=0)],
+                observation_fields=_OBS_FIELDS,
+                action_space_config=_ACTION_CONFIG,
+                reward_fn=None,
+                episode_length=timedelta(minutes=5),
+            )
+            env.reset(seed=0)
+            _obs, rewards, _d, _t, infos = env.step(np.full((2, 1), 21.0, dtype=np.float64))
+            vec_rewards.append(
+                [
+                    struct.pack("<d", rewards[i]) == struct.pack(
+                        "<d", -infos[i]["step"]["net_electric_power_w"] / 1000.0
+                    )
+                    for i in range(2)
+                ]
+            )
+        finally:
+            vec_module.rust_batch_step = previous
+    assert vec_rewards[0] == [True, True] and vec_rewards[1] == [True, True], (
+        f"the vec default is minus the step's net kW on both paths: {vec_rewards}"
+    )
+
+    single = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=None,
+        episode_length=timedelta(minutes=5),
+    )
+    single.reset(seed=0)
+    _obs, reward, _term, _trunc, info = single.step(np.array([21.0], dtype=np.float64))
+    assert struct.pack("<d", reward) == struct.pack(
+        "<d", -info["step"]["net_electric_power_w"] / 1000.0
+    ), "the single env's default is the same conversion"
+    # The vec and single defaults agree on the same fixture: the vec env's
+    # two dwellings were stepped once with the same action, so their
+    # rewards equal the single env's bitwise.
+    assert vec_rewards[0][0] and vec_rewards[0][1]
+
+
+def test_field_bounds_overrides_are_validated_on_both_envs():
+    """An unknown override key (the typo) and a malformed pair (inverted,
+    non-finite) are refused naming the key and the declared fields, on
+    both gym environments, at construction."""
+    for env_cls, kwargs in (
+        (
+            DwellingGymEnv,
+            dict(config=_DWELLING_CONFIG),
+        ),
+        (
+            VecDwellingGymEnv,
+            dict(dwellings=[_make_dwelling()]),
+        ),
+    ):
+        with pytest.raises(ValueError, match="total_pwr_w.*total_power_w"):
+            env_cls(
+                observation_fields=[cast(Any, "total_power_w")],
+                action_space_config={},
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=timedelta(minutes=5),
+                field_bounds_overrides={"total_pwr_w": (0.0, 1.0)},
+                **kwargs,
+            )
+        with pytest.raises(ValueError, match="low < high"):
+            env_cls(
+                observation_fields=[cast(Any, "total_power_w")],
+                action_space_config={},
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=timedelta(minutes=5),
+                field_bounds_overrides={"total_power_w": (10.0, -10.0)},
+                **kwargs,
+            )
+        with pytest.raises(ValueError, match="finite"):
+            env_cls(
+                observation_fields=[cast(Any, "total_power_w")],
+                action_space_config={},
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=timedelta(minutes=5),
+                field_bounds_overrides={"total_power_w": (float("nan"), 10.0)},
+                **kwargs,
+            )
+
+
+def test_reset_seed_is_range_validated_before_anything_is_touched():
+    """A float, a negative and an over-u64 seed are refused naming the
+    value or the type, and the env's state is exactly as it was: the
+    episode counters never move and the next step is bitwise the
+    control run's own."""
+    control = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    control.reset(seed=0)
+    control.step(np.array([21.0], dtype=np.float64))
+    control.step(np.array([21.0], dtype=np.float64))
+    control_obs, _r, _term, _trunc, _info = control.step(np.array([21.0], dtype=np.float64))
+
+    env = DwellingGymEnv(
+        config=_DWELLING_CONFIG,
+        observation_fields=_OBS_FIELDS,
+        action_space_config=_ACTION_CONFIG,
+        reward_fn=lambda ctx: -ctx["total_power_w"],
+        episode_length=timedelta(minutes=5),
+    )
+    env.reset(seed=0)
+    env.step(np.array([21.0], dtype=np.float64))
+    env.step(np.array([21.0], dtype=np.float64))
+    for bad_seed in (1.5, -1, 2**64, "42"):
+        with pytest.raises((TypeError, ValueError)):
+            env.reset(seed=bad_seed)
+        # The refusal touched nothing: the episode counters hold.
+        assert env._steps_elapsed == 2, (
+            f"a refused seed leaves the episode counters alone, got {env._steps_elapsed}"
+        )
+    # The env's next step is the control run's own third step, bitwise.
+    refused_obs, _r2, _term2, _trunc2, _info2 = env.step(np.array([21.0], dtype=np.float64))
+    assert struct.pack("<2d", *refused_obs) == struct.pack("<2d", *control_obs), (
+        "the refused resets left the episode exactly on its own course"
+    )

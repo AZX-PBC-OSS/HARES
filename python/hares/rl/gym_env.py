@@ -232,19 +232,58 @@ def validated_seed_sequence(seed_sequence: object) -> np.random.SeedSequence | N
 def validated_reset_seed(
     seed: object,
 ) -> int | np.random.SeedSequence | None:
-    """The reset seed is an integer, a SeedSequence or None: any other value
-    is the caller's error, named by type, refused before the reset touches
-    a dwelling. An integer-like value (a numpy integer among them) is
-    converted once to the Python integer the ``seed + env index`` form
-    reads, so a caller's seed is never silently dropped."""
+    """The reset seed is an integer in the u64 range, a SeedSequence or
+    None: any other value is the caller's error, named by type, and an
+    integer outside the u64 range (negative or over 2**64-1) is named by
+    value — both refused before the reset touches a dwelling, so a
+    refused seed leaves the env's state exactly as it was. An
+    integer-like value (a numpy integer among them) is converted once to
+    the Python integer the ``seed + env index`` form reads, so a caller's
+    seed is never silently dropped."""
     if seed is None or isinstance(seed, np.random.SeedSequence):
         return seed
     if isinstance(seed, numbers.Integral):
-        return int(seed)
+        value = int(seed)
+        if value < 0 or value > 2**64 - 1:
+            raise ValueError(
+                f"seed must be in the u64 range [0, {2**64 - 1}], got {value}"
+            )
+        return value
     raise TypeError(
         "seed must be an int, a numpy.random.SeedSequence or None, got "
         f"{type(seed).__name__}"
     )
+
+
+def validated_bounds_overrides(
+    overrides: Mapping[str, tuple[float, float]] | None,
+    declared_fields: Sequence[str],
+) -> None:
+    """The bounds overrides are keyed by the declared observation fields:
+    an unknown key would leave the default bound in place with no error
+    (the caller's intended correction never lands), so it is refused
+    naming the key and the declared fields; each pair must be finite with
+    ``low < high`` (an inverted or non-finite pair is the caller's error),
+    both refused at construction instead of the first step."""
+    if not overrides:
+        return
+    declared = sorted(declared_fields)
+    for key, pair in overrides.items():
+        if key not in declared_fields:
+            raise ValueError(
+                f"field_bounds_overrides key `{key}` is not in the declared "
+                f"observation fields {declared}"
+            )
+        low, high = float(pair[0]), float(pair[1])
+        if not (math.isfinite(low) and math.isfinite(high)):
+            raise ValueError(
+                f"field_bounds_overrides[{key!r}] must be finite, got ({low}, {high})"
+            )
+        if low >= high:
+            raise ValueError(
+                f"field_bounds_overrides[{key!r}] must satisfy low < high, "
+                f"got ({low}, {high})"
+            )
 
 
 def sorted_action_layout(
@@ -474,6 +513,19 @@ def drain_step_warnings(dwelling: Any) -> tuple[int, list[str]]:
 
 
 class DwellingGymEnv(_GYM_BASE):
+    """The single-dwelling environment.
+
+    The reward: a callable over the ``RewardContext``, or ``None`` for
+    the default — minus the step's net electric power in **kW**, converted
+    once from the step dict's ``net_electric_power_w`` in **W** (a
+    1 kW step rewards -1.0). A custom ``reward_fn`` reads the same
+    context's watts and owns its own scale.
+
+    The reset seed: an integer in the u64 range, a ``SeedSequence`` (its
+    first 64 bits are the applied seed) or ``None`` (a random one); any
+    other value, or an out-of-range integer, is refused before anything
+    is touched.
+    """
     def __init__(
         self,
         config: GymDwellingConfig,
@@ -490,6 +542,7 @@ class DwellingGymEnv(_GYM_BASE):
         self._observation_fields = validated_observation_fields(observation_fields)
         validate_reward_fn(reward_fn)
         validate_episode_length(episode_length)
+        validated_bounds_overrides(field_bounds_overrides, self._observation_fields)
         self._actors = validated_config_actors(config.actors)
         self._reward_fn = reward_fn
         self._episode_length = episode_length
@@ -639,11 +692,20 @@ class DwellingGymEnv(_GYM_BASE):
         options: dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, dict[str, Any]]:
         del options
+        # The seed is validated first: a refusal leaves the dwelling, the
+        # episode counters and the gym's own bookkeeping untouched.
+        validated = validated_reset_seed(seed)
+        applied_seed = (
+            int.from_bytes(validated.generate_state(8, dtype=np.uint64), "little")
+            if isinstance(validated, np.random.SeedSequence)
+            else secrets.randbits(63)
+            if validated is None
+            else validated
+        )
         if gym is not None:
-            super().reset(seed=seed)
+            super().reset(seed=applied_seed)
 
         self._dwelling.load_state(self._initial_snapshot)
-        applied_seed = int(seed) if seed is not None else secrets.randbits(63)
         # The reset restores the warmed-up state and reseeds the streams,
         # without rebuilding: the snapshot's converged initial condition is
         # kept, the episode's random streams are the seed's, and no

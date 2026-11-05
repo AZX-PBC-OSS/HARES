@@ -490,8 +490,7 @@ impl Equipment for TanklessWH {
         let fuel_input_w = thermal_output_w / self.efficiency_factor;
         let mut fuel_w_for_core = None;
         let mut parasitic_electric_w_reported = 0.0_f64;
-        let (electric_kw_for_core, reactive_kvar_for_core) = if self.fuel_type == FuelType::Electric
-        {
+        let (electric_w_for_core, reactive_var_for_core) = if self.fuel_type == FuelType::Electric {
             // Grid outage is gated at the root in `update_control` (electric
             // units are forced Off on a de-energized bus, making fuel_input_w zero),
             // so delivered heat and metered draw are always consistent here.
@@ -547,9 +546,9 @@ impl Equipment for TanklessWH {
         self.telemetry
             .set(tk::PARASITIC_ELECTRIC_W, parasitic_electric_w_reported);
         self.telemetry
-            .set(tk::REACTIVE_POWER_KVAR, reactive_kvar_for_core);
+            .set(tk::REACTIVE_POWER_KVAR, reactive_var_for_core);
         self.telemetry.set(tk::DRAW_FLOW_RATE_KG_S, total_draw_kg_s);
-        let has_nonzero_flow = electric_kw_for_core > 0.0 || fuel_input_w > 0.0;
+        let has_nonzero_flow = electric_w_for_core > 0.0 || fuel_input_w > 0.0;
         let mode = mode.resolve_idle(has_nonzero_flow, None);
         self.telemetry.set(
             tk::OPERATING_MODE,
@@ -561,8 +560,8 @@ impl Equipment for TanklessWH {
         );
         let core_output = CoreOutput {
             flows: CoreFlows {
-                electric_w: Some(ElectricPower::Consumption(electric_kw_for_core)),
-                reactive_power_var: Some(reactive_kvar_for_core),
+                electric_w: Some(ElectricPower::Consumption(electric_w_for_core)),
+                reactive_power_var: Some(reactive_var_for_core),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
                 sensible_cooling_w: None,
@@ -703,7 +702,7 @@ impl Equipment for TanklessWH {
         // capability-presence rules for every declared capability — the
         // restore contract is that a checkpoint restores a state
         // `validate_core_contract` accepts.
-        let electric_kw_for_core = if self.fuel_type == FuelType::Electric {
+        let electric_w_for_core = if self.fuel_type == FuelType::Electric {
             (decoded.fuel_input_w).max(0.0)
         } else {
             (decoded.parasitic_electric_w).max(0.0)
@@ -712,11 +711,11 @@ impl Equipment for TanklessWH {
             fuel_type: self.fuel_type,
             consumption_w: decoded.fuel_input_w.max(0.0),
         });
-        let has_nonzero_flow = electric_kw_for_core > 0.0 || decoded.fuel_input_w > 0.0;
+        let has_nonzero_flow = electric_w_for_core > 0.0 || decoded.fuel_input_w > 0.0;
         let restored_mode = OperatingMode::Heating.resolve_idle(has_nonzero_flow, None);
         self.core_output = CoreOutput {
             flows: CoreFlows {
-                electric_w: Some(ElectricPower::Consumption(electric_kw_for_core)),
+                electric_w: Some(ElectricPower::Consumption(electric_w_for_core)),
                 reactive_power_var: Some(decoded.reactive_power_var),
                 fuel_w: fuel_w_for_core,
                 thermal_output_w: None,
