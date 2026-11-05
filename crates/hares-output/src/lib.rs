@@ -10,6 +10,7 @@ pub mod callback;
 pub mod catalogue;
 pub mod columns;
 pub mod metrics;
+pub mod recording;
 pub mod reduce;
 pub mod report;
 pub mod writer;
