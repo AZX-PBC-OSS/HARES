@@ -13,6 +13,8 @@ import time
 from typing import Any
 import weakref
 
+from ._types import validate_timeout
+
 try:
     import helics
 except ImportError as exc:  # pragma: no cover - exercised via import test
@@ -98,14 +100,18 @@ def wait_for_broker(broker: helics.HelicsBroker, timeout: float = 60.0) -> None:
 
     Args:
         broker: HELICS broker handle.
-        timeout: Maximum wall-clock seconds to wait for connectivity.
+        timeout: Maximum wall-clock seconds to wait for connectivity. The
+            same guard every blocking HELICS call's timeout routes through
+            (the shared validator): a positive finite number of seconds.
 
     Raises:
+        ValueError: If ``timeout`` is not a positive, finite number of
+            seconds: an infinite timeout would never expire and a NaN one
+            fails every comparison.
         TimeoutError: If the broker does not report connected before ``timeout``.
     """
 
-    if timeout <= 0:
-        raise ValueError("timeout must be positive")
+    timeout = validate_timeout(timeout, "timeout")
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

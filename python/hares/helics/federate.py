@@ -23,7 +23,6 @@ from __future__ import annotations
 from collections.abc import Callable
 import itertools
 import logging
-import math
 import os
 import socket
 import threading
@@ -38,7 +37,7 @@ except ImportError as exc:  # pragma: no cover - exercised via import test
         "HELICS not installed. Install with: pip install 'hares[helics]'"
     ) from exc
 
-from ._types import HelicsCoreLike, HelicsFederateInfoLike, HelicsFederateLike
+from ._types import HelicsCoreLike, HelicsFederateInfoLike, HelicsFederateLike, validate_timeout
 from .broker import allocate_ephemeral_port
 
 _LOG = logging.getLogger(__name__)
@@ -141,17 +140,6 @@ def wait_for_pending_aborts(timeout_s: float = 10.0) -> bool:
             break
         thread.join(remaining)
     return not any(thread.is_alive() for thread in threads)
-
-
-def validate_timeout(value: float, name: str) -> float:
-    """Validate that ``value`` is a positive, finite timeout in seconds."""
-    try:
-        result = float(value)
-    except (TypeError, ValueError) as exc:
-        raise TypeError(f"{name} must be a number of seconds, got {value!r}") from exc
-    if not math.isfinite(result) or result <= 0.0:
-        raise ValueError(f"{name} must be a positive, finite number of seconds, got {value!r}")
-    return result
 
 
 def core_init_timeout_option(timeout_s: float) -> str:

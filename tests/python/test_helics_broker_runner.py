@@ -277,6 +277,33 @@ def test_wait_for_broker_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
         broker_module.wait_for_broker(broker, timeout=0.01)
 
 
+def test_wait_for_broker_rejects_an_infinite_and_a_nan_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The broker wait's timeout routes through the shared validator: a
+    positive finite number of seconds, the error naming the value. The
+    red state at the parent ran the raw ``<= 0`` guard: it admitted ``inf``
+    (the loop never expired: the wait hung until the process was killed)
+    and rejected ``nan`` as a ``TimeoutError`` raised with no wait, the
+    wrong error class."""
+    broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
+
+    class _CountingBroker(_NeverConnectedBroker):
+        def __init__(self) -> None:
+            super().__init__("zmq", "b", "--federates=1")
+            self.probes = 0
+
+        def is_connected(self) -> bool:
+            self.probes += 1
+            return False
+
+    broker = _CountingBroker()
+    for bad in (float("inf"), float("nan"), -1.0, 0.0):
+        with pytest.raises(ValueError, match="positive, finite number of seconds"):
+            broker_module.wait_for_broker(broker, timeout=bad)
+    assert broker.probes == 0, "no refusal entered the connectivity loop"
+
+
 def test_wait_for_broker_raises_when_connectivity_api_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     broker_module, _, _ = _import_broker_runner_modules(monkeypatch)
 
