@@ -113,6 +113,12 @@ pub struct CentralAirConditionerConfig {
     /// and oil foaming. EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_oat_compressor_cooling_c: Option<f64>,
+    /// The outdoor-air economizer: the dry-bulb changeover over the OA
+    /// damper's two positions and lockouts. `None` (the default) configures
+    /// no damper and no economizer state: the unit's frames carry no
+    /// economizer surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economizer: Option<crate::hvac::oa_damper::EconomizerConfig>,
 }
 
 impl EquipmentTypedConfig for CentralAirConditionerConfig {
@@ -288,6 +294,9 @@ impl CentralAirConditionerConfig {
                         .to_string(),
                 ));
             }
+        }
+        if let Some(economizer) = &self.economizer {
+            economizer.validate()?;
         }
         Ok(())
     }
@@ -826,6 +835,16 @@ impl hares_types::DescribeFields for CentralAirConditionerConfig {
                     ..Default::default()
                 },
             ),
+            (
+                "economizer",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the outdoor-air economizer's declaration: the dry-bulb changeover \
+                         over the OA damper's minimum and full-open positions and lockouts",
+                    ),
+                    ..Default::default()
+                },
+            ),
         ])
     }
 }
@@ -1130,6 +1149,7 @@ mod tests {
             plf_max: Some(1.0),
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         let ec = typed_config(cfg.clone());
         assert!(ec.is_typed());
@@ -1196,6 +1216,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1234,6 +1255,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1272,6 +1294,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1310,6 +1333,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1348,6 +1372,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
 
         assert_eq!(
@@ -1400,6 +1425,7 @@ mod tests {
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             }
         }
 
@@ -1860,6 +1886,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         // derived_plf_cd ignores startup_cd; returns SEER-derived value (SEER=10 → 0.20).
         assert_eq!(cfg.derived_plf_cd(), Some(0.20));

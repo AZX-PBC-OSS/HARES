@@ -159,6 +159,7 @@ pub fn sample_config_for_class(class: &str) -> Option<EquipmentConfig> {
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             },
         ),
         "Room AC" => typed_alias_config(

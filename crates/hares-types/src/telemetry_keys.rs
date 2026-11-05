@@ -254,6 +254,31 @@ pub const MODE_DURATION_S: &str = "mode_duration_s";
 /// scope: internal
 pub const COOLING_OAT_LOCKOUT: &str = "cooling_oat_lockout";
 
+/// The outdoor-air economizer's damper position as the published fraction
+/// of the design (full-open) flow: the minimum position's fraction when the
+/// damper is at its IAQ floor or a lockout holds it, 1.0 when the
+/// free-cooling position is open. Zero while the unit has no economizer.
+///
+/// scope: internal
+pub const ECONOMIZER_OA_DAMPER_POSITION: &str = "economizer_oa_damper_position";
+
+/// The outdoor-air economizer's damper flow this step (m³/s): the damper
+/// position's fraction of the design flow while the unit's fan runs, zero
+/// when it does not. The same value the envelope's ventilation path carries
+/// (the outdoor air's load), so the mixed-air energy balance reconciles
+/// against it.
+///
+/// scope: internal
+pub const ECONOMIZER_OA_FLOW_M3_S: &str = "economizer_oa_flow_m3_s";
+
+/// The outdoor-air economizer's free-cooling credit this step (W): the
+/// outdoor air's sensible cooling the envelope's ventilation path carries,
+/// by which the DX stage load is reduced. Zero when the damper is not at
+/// its free-cooling position.
+///
+/// scope: internal
+pub const ECONOMIZER_FREE_COOLING_W: &str = "economizer_free_cooling_w";
+
 /// scope: internal
 pub const DEFROST_ACTIVE: &str = "defrost_active";
 
@@ -1191,6 +1216,9 @@ mod tests {
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
             COOLING_OAT_LOCKOUT,
+            ECONOMIZER_OA_DAMPER_POSITION,
+            ECONOMIZER_OA_FLOW_M3_S,
+            ECONOMIZER_FREE_COOLING_W,
             DEFROST_ACTIVE,
             DEFROST_TIME_FRACTION,
             DEFROST_EXTRA_POWER_W,
@@ -1452,6 +1480,9 @@ mod tests {
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
             COOLING_OAT_LOCKOUT,
+            ECONOMIZER_OA_DAMPER_POSITION,
+            ECONOMIZER_OA_FLOW_M3_S,
+            ECONOMIZER_FREE_COOLING_W,
             DEFROST_ACTIVE,
             DEFROST_TIME_FRACTION,
             DEFROST_EXTRA_POWER_W,

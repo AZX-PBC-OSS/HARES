@@ -82,6 +82,17 @@ pub enum ClampSite {
     /// `curve_index_clamps` drains: that counter carries the policy
     /// limit and the run result's totals, this site carries the census.
     CurveIndex,
+    /// The outdoor-air damper's minimum flow clamped to the design flow:
+    /// a damper whose configured minimum position passes more air than its
+    /// full-open design flow is held there (the damper's minimum position
+    /// is then its full open).
+    EconomizerDamperLimit,
+    /// The outdoor-air economizer's net cooling delivery floored at zero:
+    /// a step where the damper's fan-driven waste heat exceeds the damper's
+    /// OA cooling plus the deferred coil load is a heat gain the cooling
+    /// category's sign convention cannot carry, so the excess rides the
+    /// fan's heat term and the floored net is counted here.
+    EconomizerNetCoolingFloor,
 }
 
 impl ClampSite {
@@ -98,10 +109,12 @@ impl ClampSite {
         Self::TankDrawTruncation,
         Self::FlowFractionBounds,
         Self::CurveIndex,
+        Self::EconomizerDamperLimit,
+        Self::EconomizerNetCoolingFloor,
     ];
 
     /// The number of clamp sites.
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 13;
 
     /// The site's own name: the key the census reports the site's count
     /// under.
@@ -119,6 +132,8 @@ impl ClampSite {
             Self::TankDrawTruncation => "tank_draw_truncation",
             Self::FlowFractionBounds => "flow_fraction_bounds",
             Self::CurveIndex => "curve_index",
+            Self::EconomizerDamperLimit => "economizer_damper_limit",
+            Self::EconomizerNetCoolingFloor => "economizer_net_cooling_floor",
         }
     }
 }

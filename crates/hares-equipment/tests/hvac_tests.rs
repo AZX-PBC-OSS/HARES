@@ -665,6 +665,7 @@ fn hvac_port_contributions_are_correct_sign() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -3707,6 +3708,7 @@ fn update_mode_cooling_transition() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -3826,6 +3828,7 @@ fn ac_core_output_carries_cop() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -3946,6 +3949,7 @@ fn speed_staging_keys_present_in_telemetry() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -4034,6 +4038,7 @@ fn single_speed_duty_cycle_equals_part_load_ratio() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -4114,6 +4119,7 @@ fn schedule_setpoint_keys_reflect_static_when_no_schedule_source() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -4504,6 +4510,7 @@ fn ac_sensible_thermal_port_strongly_negative_at_sf1() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();
@@ -4572,6 +4579,7 @@ fn ac_electrical_halved_thermal_unscaled_at_half_sf() {
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             },
         )
         .unwrap()
@@ -5097,6 +5105,7 @@ fn a_failed_hvac_step_leaves_no_partial_state() {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap();

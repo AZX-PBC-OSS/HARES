@@ -320,6 +320,7 @@ pub fn ac_spec_from_py(ac: &PyAirConditioner) -> PyResult<EquipmentSpec> {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         Some(
             EquipmentConfig::from_typed(ac.name.clone(), "Air Conditioner".to_string(), cfg)

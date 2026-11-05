@@ -2574,3 +2574,55 @@ gives it: the environment view is recomputed each step, and the tariff
 arm reads the intensity from the stored signal rather than from the view
 it just reset (which published `None` from the first tariff step on and
 undid the per-field update one step after its application).
+
+## The outdoor-air economizer: the dry-bulb changeover, the damper's two positions and the credited DX stage load
+
+The outdoor-air economizer declares on the central air conditioner's
+typed config (`economizer`, off by default: an unconfigured unit's
+telemetry keys, descriptor fields and frames are a damper-free unit's
+own). The form is the dry-bulb one: the damper opens to its free-cooling
+position when the thermostat calls for cooling and the outdoor dry-bulb
+is below the changeover setpoint (default 10.0 °C per ASHRAE 90.1-2022
+§6.5.1.4 economizer changeover guidance, the citation the cooling
+compressor's own minimum-OAT lockout already carries); a warm outdoor,
+a lockout hold or no cooling call rests it at the minimum position (the
+configured IAQ floor's flow). The lockouts are EnergyPlus' economizer
+control's own shape (`MixedAir.cc` `Checksetpoints` and the
+`TempLowLim` gate): the outdoor dew point above the configured limit
+(dampers cannot dehumidify; the `DPTempLim` gate) and the outdoor
+dry-bulb below the configured floor (the `TempLowLim` gate) each hold
+the damper at the minimum position with the mechanical cooling running.
+Either limit unconfigured is not operative, the same semantics the
+EnergyPlus IDD gives the blank fields. The enthalpy changeover form
+(comparing total enthalpies) is the alternative rejected: the design
+names the dry-bulb form.
+
+The damper's free-cooling delivery is the unit's own zone-facing flow:
+the damper's outdoor-air sensible cooling (`ρ·V·cp·(T_zone − T_out)·PLR`
+at the outdoor-condition density) is credited against the DX stage load
+in the same step — one flow, one load, one value in the port's cooling
+contribution, the reported `thermal_output_w` and the
+`economizer_free_cooling_w` telemetry. A cooling call pins the zone at
+or above (setpoint − hysteresis) while the changeover requires the
+outdoor air below the changeover setpoint, so the driving difference
+dominates the fan's waste heat; a step where the fan's own waste heat
+exceeds the damper's OA cooling plus the deferred coil is floored at
+zero (counted in the clamp census) because the cooling category's sign
+convention cannot carry a heat gain. The damper's flow is fan-driven:
+the flow, its fan-power share and the credit all scale with the fan's
+on-fraction (the step's part-load ratio), so the thermostat's latched
+zero-duty steps move no outdoor air. The damper's minimum flow clamped
+to its design flow (a damper whose minimum passes more air than its
+full-open design) is a counted clamp, not a silent hold.
+
+Alternatives rejected: crediting only the full-open position (leaves the
+minimum-position flow's cooling unnetted and flips the cooling
+category's sign on the latch's zero-duty steps); routing the OA load
+through the envelope's ventilation coupling (double-counts it against
+the unit's own port and trips the per-zone thermal consistency check —
+the damper is the unit's surface, not a parallel ventilation path); the
+mixed-air coil state (the coil entering the mixed temperature) for the
+same double-counting reason and because the OA's flow would then need
+its own envelope path anyway. The OA's latent load is not modeled: the
+dry-bulb form's credit is sensible-only, and the humid lockout bounds
+the case where that omission would matter.

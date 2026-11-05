@@ -167,6 +167,9 @@ impl HpCooler {
             plf_min: hp_cfg.common.plf_min,
             plf_max: hp_cfg.common.plf_max,
             charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
+            // The heat-pump cooler's economizer surface rides its own row;
+            // the central-AC mapping carries none today.
+            economizer: None,
             // Minimum OAT for cooling compressor operation [°C].
             // Below this temperature the compressor is locked out so that an
             // economizer can provide free cooling. Default 10.0 °C per ASHRAE
@@ -475,6 +478,7 @@ impl GshpCooler {
             charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
             // GSHP: compressor is indoors on a ground loop; OAT lockout does not apply.
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
 
         let mut cfg = EquipmentConfig::from_typed(
@@ -952,6 +956,7 @@ impl WshpCooler {
             charge_defect_ratio: hp_cfg.common.charge_defect_ratio,
             // WSHP: compressor is indoors on a water loop; OAT lockout does not apply.
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
 
         let mut cfg = EquipmentConfig::from_typed(

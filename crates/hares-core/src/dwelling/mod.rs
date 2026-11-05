@@ -22095,6 +22095,7 @@ latent_gain_fraction = 0.08
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             },
         )
         .expect("typed AC config");
@@ -22191,6 +22192,7 @@ latent_gain_fraction = 0.08
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             },
         )
         .expect("typed AC config");
@@ -23219,6 +23221,7 @@ occupancy = 1.0
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             },
         )
         .expect("typed AC config");
