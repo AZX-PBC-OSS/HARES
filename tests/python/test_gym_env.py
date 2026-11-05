@@ -20,6 +20,7 @@ from gymnasium import spaces
 
 from hares._hares import Dwelling as PyDwelling
 from hares._hares import SimulationConfig
+from hares._hares import batch_step as extension_batch_step
 from hares import Actor
 from hares.rl.gym_env import (
     DwellingGymEnv,
@@ -1212,7 +1213,7 @@ def test_env_equipment_keys_resolve_for_every_roster_unit():
         row = obs[0] if obs.ndim == 2 else obs
         assert row.shape == (len(fields),)
         assert np.all(np.isfinite(row)), f"non-finite observation: {row}"
-        unit = env.dwelling if hasattr(env, "dwelling") else env.envs[0]
+        unit = env.dwelling if isinstance(env, DwellingGymEnv) else env.envs[0]
         equipment = unit.telemetry().equipment()
         powers = list(equipment["power_w"])
         for idx, name in enumerate(names):
@@ -1425,7 +1426,7 @@ class _StatefulActor(Actor):
         self.steps = int.from_bytes(state, "little")
 
 
-def _config_with_actors(actors: list[Any]) -> GymDwellingConfig:
+def _config_with_actors(actors: list[Any] | None) -> GymDwellingConfig:
     return GymDwellingConfig(
         hpxml=HPXML,
         schedule=SCHEDULE,
@@ -2212,17 +2213,18 @@ def test_pv_production_sits_inside_the_observation_box():
     would refuse."""
     from hares import SimulationConfig
 
+    sim_config = SimulationConfig(
+        start_time="2023-06-01T10:00:00-07:00",
+        duration=14400,
+        time_res=900,
+        master_seed=0,
+    )
     config = GymDwellingConfig(
         hpxml=str(ROOT / "tests/fixtures/hpxml/ochre_samples/base-pv.xml"),
         schedule=SCHEDULE,
         weather=WEATHER,
         defaults=str(HARES_DEFAULTS),
-        sim_config=SimulationConfig(
-            start_time="2023-06-01T10:00:00-07:00",
-            duration=14400,
-            time_res=900,
-            master_seed=0,
-        ),
+        sim_config=sim_config,
     )
     # The PV unit's own name, read off the built home's roster.
     probe = PyDwelling.from_hpxml(
@@ -2230,7 +2232,7 @@ def test_pv_production_sits_inside_the_observation_box():
         schedule=config.schedule,
         weather=config.weather,
         defaults=config.defaults,
-        config=config.sim_config,
+        config=sim_config,
     )
     probe.initialize()
     names = list(probe.telemetry().equipment()["names"])
@@ -2690,7 +2692,7 @@ def test_both_step_paths_share_the_clamp_and_health_contract():
 
         previous = vec_module.rust_batch_step
         vec_module.rust_batch_step = (
-            vec_module._extension_batch_step if rust_path else None
+            extension_batch_step if rust_path else None
         )
         try:
             dwellings = [_make_dwelling(seed=0), _make_dwelling(seed=0)]
@@ -2723,7 +2725,7 @@ def test_both_step_paths_share_the_clamp_and_health_contract():
 
         previous = vec_module.rust_batch_step
         vec_module.rust_batch_step = (
-            vec_module._extension_batch_step if rust_path else None
+            extension_batch_step if rust_path else None
         )
         try:
             dwellings = [_make_dwelling(seed=0), _make_dwelling(seed=0)]
@@ -2752,6 +2754,42 @@ def test_both_step_paths_share_the_clamp_and_health_contract():
     )
 
 
+def test_both_step_paths_refuse_a_later_envs_action_before_stepping_any():
+    """A refused action in a later environment leaves every dwelling
+    unstepped on both step paths: the batch path maps and accepts every
+    row before it applies one, and the fallback validates every row
+    before it touches one. RED at the fallback's per-row dispatch, where
+    the first environment stepped before the second row was refused."""
+    for rust_path in (True, False):
+        import hares.rl.vec_env as vec_module
+
+        previous = vec_module.rust_batch_step
+        vec_module.rust_batch_step = extension_batch_step if rust_path else None
+        try:
+            dwellings = [_make_dwelling(seed=0), _make_dwelling(seed=0)]
+            env = VecDwellingGymEnv(
+                dwellings=dwellings,
+                observation_fields=_OBS_FIELDS,
+                action_space_config=_ACTION_CONFIG,
+                reward_fn=lambda ctx: -ctx["total_power_w"],
+                episode_length=timedelta(minutes=5),
+            )
+            env.reset(seed=0)
+            # The second dwelling loses the action's target after the
+            # layout is frozen on both: its row's signal is refused while
+            # the first dwelling's row is valid.
+            env.envs[1].remove_equipment("Gas Furnace")
+            before = env.envs[0].telemetry().timestep_index
+            with pytest.raises(Exception, match="Gas Furnace"):
+                env.step(np.full((2, 1), 21.0, dtype=np.float64))
+            assert env.envs[0].telemetry().timestep_index == before, (
+                f"rust_path={rust_path}: the refused row must not step the "
+                "first environment"
+            )
+        finally:
+            vec_module.rust_batch_step = previous
+
+
 def test_the_default_reward_is_bitwise_equal_across_paths_and_envs():
     """`reward_fn=None` pays the same default on the single env and on
     both vec paths: minus the step's net power in kW, on bits, one
@@ -2763,7 +2801,7 @@ def test_the_default_reward_is_bitwise_equal_across_paths_and_envs():
 
         previous = vec_module.rust_batch_step
         vec_module.rust_batch_step = (
-            vec_module._extension_batch_step if rust_path else None
+            extension_batch_step if rust_path else None
         )
         try:
             env = VecDwellingGymEnv(
@@ -2811,43 +2849,34 @@ def test_field_bounds_overrides_are_validated_on_both_envs():
     """An unknown override key (the typo) and a malformed pair (inverted,
     non-finite) are refused naming the key and the declared fields, on
     both gym environments, at construction."""
-    for env_cls, kwargs in (
-        (
-            DwellingGymEnv,
-            dict(config=_DWELLING_CONFIG),
-        ),
-        (
-            VecDwellingGymEnv,
-            dict(dwellings=[_make_dwelling()]),
-        ),
-    ):
+
+    def build_single(**overrides: Any) -> DwellingGymEnv:
+        return DwellingGymEnv(
+            config=_DWELLING_CONFIG,
+            observation_fields=[cast(Any, "total_power_w")],
+            action_space_config={},
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+            **overrides,
+        )
+
+    def build_vec(**overrides: Any) -> VecDwellingGymEnv:
+        return VecDwellingGymEnv(
+            dwellings=[_make_dwelling()],
+            observation_fields=[cast(Any, "total_power_w")],
+            action_space_config={},
+            reward_fn=lambda ctx: -ctx["total_power_w"],
+            episode_length=timedelta(minutes=5),
+            **overrides,
+        )
+
+    for build in (build_single, build_vec):
         with pytest.raises(ValueError, match="total_pwr_w.*total_power_w"):
-            env_cls(
-                observation_fields=[cast(Any, "total_power_w")],
-                action_space_config={},
-                reward_fn=lambda ctx: -ctx["total_power_w"],
-                episode_length=timedelta(minutes=5),
-                field_bounds_overrides={"total_pwr_w": (0.0, 1.0)},
-                **kwargs,
-            )
+            build(field_bounds_overrides={"total_pwr_w": (0.0, 1.0)})
         with pytest.raises(ValueError, match="low < high"):
-            env_cls(
-                observation_fields=[cast(Any, "total_power_w")],
-                action_space_config={},
-                reward_fn=lambda ctx: -ctx["total_power_w"],
-                episode_length=timedelta(minutes=5),
-                field_bounds_overrides={"total_power_w": (10.0, -10.0)},
-                **kwargs,
-            )
+            build(field_bounds_overrides={"total_power_w": (10.0, -10.0)})
         with pytest.raises(ValueError, match="finite"):
-            env_cls(
-                observation_fields=[cast(Any, "total_power_w")],
-                action_space_config={},
-                reward_fn=lambda ctx: -ctx["total_power_w"],
-                episode_length=timedelta(minutes=5),
-                field_bounds_overrides={"total_power_w": (float("nan"), 10.0)},
-                **kwargs,
-            )
+            build(field_bounds_overrides={"total_power_w": (float("nan"), 10.0)})
 
 
 def test_reset_seed_is_range_validated_before_anything_is_touched():

@@ -428,20 +428,26 @@ class VecDwellingGymEnv(_VectorEnvBase):
             return _default_reward(step_data)
         return float(self._reward_fn(_reward_context(step_data, dwelling)))
 
-    def _apply_actions(self, dwelling: PyDwelling, action: np.ndarray) -> None:
-        """One dwelling's action row through the batch path's own two
-        helpers: the extension's ``clip_action`` (the clip counted on the
-        acting dwelling's run health, in every build) and the queue-time
-        acceptance check (a signal the equipment would refuse is refused
-        here, before anything applies), then the dispatch by sorted name —
-        the same clip-and-check-and-dispatch ``batch_step`` runs, so the
-        two step paths share one health contract."""
-        values = clip_action(
-            dwelling, [float(value) for value in action], self._action_layout
-        )
+    def _prepare_actions(
+        self, dwelling: PyDwelling, action: np.ndarray
+    ) -> list[tuple[str, Any]]:
+        """Validate one dwelling's action row without changing the
+        dwelling: the same finite screen and per-column clip the extension
+        applies, and the same queue-time acceptance check each signal must
+        pass. Returns the signals to dispatch once every environment's row
+        is accepted, so a refused row in one environment leaves every
+        dwelling untouched, the ``batch_step`` contract."""
+        raw = [float(value) for value in action]
+        for index, (equipment, field) in enumerate(self._action_layout):
+            if not math.isfinite(raw[index]):
+                raise ValueError(
+                    f"action value at index {index} for {equipment}.{field} "
+                    f"is not finite: {raw[index]}"
+                )
+        clipped = np.clip(action, self._action_low, self._action_high)
         action_values: dict[str, dict[str, float]] = {}
-        for (equipment, field), value in zip(self._action_layout, values, strict=True):
-            action_values.setdefault(equipment, {})[field] = value
+        for (equipment, field), value in zip(self._action_layout, clipped, strict=True):
+            action_values.setdefault(equipment, {})[field] = float(value)
         signals: list[tuple[str, Any]] = []
         for equipment in sorted(action_values):
             signal = build_control_signal(
@@ -452,6 +458,16 @@ class VecDwellingGymEnv(_VectorEnvBase):
             # raises, before any signal reaches any equipment.
             dwelling.check_control(equipment, signal)
             signals.append((equipment, signal))
+        return signals
+
+    def _apply_actions(
+        self, dwelling: PyDwelling, action: np.ndarray, signals: list[tuple[str, Any]]
+    ) -> None:
+        """One dwelling's prepared action row through the batch path's own
+        counted clip: the extension's ``clip_action`` records the clamp
+        count on the acting dwelling's run health in every build, then the
+        signals the pre-pass already accepted dispatch by sorted name."""
+        clip_action(dwelling, [float(value) for value in action], self._action_layout)
         for equipment, signal in signals:
             dwelling.apply_control(equipment, signal)
 
@@ -528,10 +544,18 @@ class VecDwellingGymEnv(_VectorEnvBase):
                 info["step"] = step_data
                 infos.append(info)
         else:
-            for idx, (dwelling, action_row) in enumerate(
-                zip(self._dwellings, arr, strict=True)
+            # Every row is validated before any dwelling is touched: a
+            # refused action in one environment leaves every dwelling
+            # unstepped, the batch path's atomic refusal.
+            rows = list(zip(self._dwellings, arr, strict=True))
+            prepared = [
+                self._prepare_actions(dwelling, action_row)
+                for dwelling, action_row in rows
+            ]
+            for idx, ((dwelling, action_row), signals) in enumerate(
+                zip(rows, prepared, strict=True)
             ):
-                self._apply_actions(dwelling, action_row)
+                self._apply_actions(dwelling, action_row, signals)
                 step_data = dwelling.step()
                 # The same plan the batch path reads through, into the
                 # same buffer: the two paths read the same values by
