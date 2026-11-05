@@ -11,6 +11,11 @@ use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use crate::hvac::heating_config::HvacSetpointConfig;
 
+/// The compressor's minimum operating outdoor temperature when the config
+/// leaves the field blank: EnergyPlus `DXCoils.cc:731`,
+/// `minOATCompDXCooling = -25.0`.
+pub(crate) const DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C: f64 = -25.0;
+
 /// Typed configuration for central air conditioners.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +118,12 @@ pub struct CentralAirConditionerConfig {
     /// and oil foaming. EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_oat_compressor_cooling_c: Option<f64>,
+    /// The outdoor-air economizer: the dry-bulb changeover over the OA
+    /// damper's two positions and lockouts. `None` (the default) configures
+    /// no damper and no economizer state: the unit's frames carry no
+    /// economizer surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economizer: Option<crate::hvac::oa_damper::EconomizerConfig>,
 }
 
 impl EquipmentTypedConfig for CentralAirConditionerConfig {
@@ -287,6 +298,26 @@ impl CentralAirConditionerConfig {
                     "CentralAirConditionerConfig: stage_shrs must be finite and within [0, 1]"
                         .to_string(),
                 ));
+            }
+        }
+        if let Some(economizer) = &self.economizer {
+            economizer.validate()?;
+            // The compressor's minimum-OAT lockout suppresses the whole
+            // unit below its floor, and the economizer's changeover opens
+            // the damper only below its own setpoint. A floor at or above
+            // the changeover leaves the free-cooling band empty: the
+            // declaration would be accepted and silently never fire, so it
+            // is a typed error naming both fields.
+            let min_oat_c = self
+                .min_oat_compressor_cooling_c
+                .unwrap_or(DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C);
+            if min_oat_c >= economizer.changeover_setpoint_c {
+                return Err(HaresError::Equipment(format!(
+                    "CentralAirConditionerConfig: the economizer's changeover_setpoint_c {} \
+                     must exceed the compressor's minimum-OAT lockout {} (the free-cooling \
+                     band is empty)",
+                    economizer.changeover_setpoint_c, min_oat_c
+                )));
             }
         }
         Ok(())
@@ -826,6 +857,16 @@ impl hares_types::DescribeFields for CentralAirConditionerConfig {
                     ..Default::default()
                 },
             ),
+            (
+                "economizer",
+                hares_types::FieldMeta {
+                    description: Some(
+                        "the outdoor-air economizer's declaration: the dry-bulb changeover \
+                         over the OA damper's minimum and full-open positions and lockouts",
+                    ),
+                    ..Default::default()
+                },
+            ),
         ])
     }
 }
@@ -1130,6 +1171,7 @@ mod tests {
             plf_max: Some(1.0),
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         let ec = typed_config(cfg.clone());
         assert!(ec.is_typed());
@@ -1196,6 +1238,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1234,6 +1277,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1272,6 +1316,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1310,6 +1355,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         assert!(cfg.validate().is_err());
     }
@@ -1348,6 +1394,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
 
         assert_eq!(
@@ -1400,6 +1447,7 @@ mod tests {
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             }
         }
 
@@ -1860,6 +1908,7 @@ mod tests {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         };
         // derived_plf_cd ignores startup_cd; returns SEER-derived value (SEER=10 → 0.20).
         assert_eq!(cfg.derived_plf_cd(), Some(0.20));

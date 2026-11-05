@@ -177,6 +177,7 @@ fn sample_central_ac_config() -> CentralAirConditionerConfig {
         plf_max: Some(1.0),
         charge_defect_ratio: None,
         min_oat_compressor_cooling_c: None,
+        economizer: None,
     }
 }
 

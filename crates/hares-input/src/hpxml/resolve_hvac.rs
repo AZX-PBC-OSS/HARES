@@ -1309,6 +1309,7 @@ fn try_build_central_ac_config(
         plf_max: curve_bounds.plf_max,
         charge_defect_ratio: params.get("charge_defect_ratio").and_then(Value::as_f64),
         min_oat_compressor_cooling_c: None,
+        economizer: None,
     };
     Ok(
         EquipmentConfig::from_typed(name.to_string(), "Air Conditioner".to_string(), cfg)

@@ -254,6 +254,33 @@ pub const MODE_DURATION_S: &str = "mode_duration_s";
 /// scope: internal
 pub const COOLING_OAT_LOCKOUT: &str = "cooling_oat_lockout";
 
+/// The outdoor-air economizer's damper position as the published fraction
+/// of the design (full-open) flow: the minimum position's fraction when the
+/// damper is at its IAQ floor or a lockout holds it, 1.0 when the
+/// free-cooling position is open. Zero while the unit has no economizer.
+///
+/// scope: internal
+pub const ECONOMIZER_OA_DAMPER_POSITION: &str = "economizer_oa_damper_position";
+
+/// The outdoor-air economizer's damper flow this step (m³/s): the damper
+/// position's fraction of the design flow at the fan's average on-fraction,
+/// zero when the fan does not run. The unit's cooling contribution carries
+/// this flow's outdoor-air load (not a separate envelope ventilation path);
+/// the credited share is capped at the DX stage load.
+///
+/// scope: internal
+pub const ECONOMIZER_OA_FLOW_M3_S: &str = "economizer_oa_flow_m3_s";
+
+/// The outdoor-air economizer's free-cooling credit this step (W): the
+/// lesser of the outdoor air's sensible cooling at the damper's flow and
+/// the DX stage load, the deferred load by which the compressor's stage is
+/// reduced. A flow that could cool more than the call is credited at the
+/// call, so the excess does not over-cool the zone. Zero when the damper
+/// is not at its free-cooling position.
+///
+/// scope: internal
+pub const ECONOMIZER_FREE_COOLING_W: &str = "economizer_free_cooling_w";
+
 /// scope: internal
 pub const DEFROST_ACTIVE: &str = "defrost_active";
 
@@ -1191,6 +1218,9 @@ mod tests {
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
             COOLING_OAT_LOCKOUT,
+            ECONOMIZER_OA_DAMPER_POSITION,
+            ECONOMIZER_OA_FLOW_M3_S,
+            ECONOMIZER_FREE_COOLING_W,
             DEFROST_ACTIVE,
             DEFROST_TIME_FRACTION,
             DEFROST_EXTRA_POWER_W,
@@ -1452,6 +1482,9 @@ mod tests {
             TIME_AT_CURRENT_SPEED_S,
             MODE_DURATION_S,
             COOLING_OAT_LOCKOUT,
+            ECONOMIZER_OA_DAMPER_POSITION,
+            ECONOMIZER_OA_FLOW_M3_S,
+            ECONOMIZER_FREE_COOLING_W,
             DEFROST_ACTIVE,
             DEFROST_TIME_FRACTION,
             DEFROST_EXTRA_POWER_W,

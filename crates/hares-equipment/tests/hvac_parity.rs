@@ -158,6 +158,7 @@ fn cfg(name: &str, class: &str, pairs: &[(&str, f64)]) -> EquipmentConfig {
                 plf_max: None,
                 charge_defect_ratio: None,
                 min_oat_compressor_cooling_c: None,
+                economizer: None,
             },
         )
         .unwrap(),
@@ -1125,6 +1126,7 @@ fn two_speed_ac_config() -> EquipmentConfig {
             plf_max: None,
             charge_defect_ratio: None,
             min_oat_compressor_cooling_c: None,
+            economizer: None,
         },
     )
     .unwrap()
