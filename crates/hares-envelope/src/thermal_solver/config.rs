@@ -956,6 +956,9 @@ pub enum ThermalSolverError {
     /// A mechanical ventilation recovery efficiency outside `[0, 1]`.
     #[error("{kind} ventilation recovery efficiency {value} is outside [0, 1]")]
     InvalidVentilationRecovery { kind: &'static str, value: f64 },
+    /// A mechanical ventilation flow that is not finite and non-negative.
+    #[error("mechanical ventilation flow {value} m3/s must be finite and >= 0")]
+    InvalidVentilationFlow { value: f64 },
 }
 
 pub type Result<T> = std::result::Result<T, ThermalSolverError>;

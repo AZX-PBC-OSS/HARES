@@ -388,24 +388,21 @@ pub(crate) fn parse_epw_str(contents: &str) -> Result<WeatherTimeSeries, Weather
         // not contain (a non-leap February 29 among them) leaves that
         // calendar's count None, and the file must match the calendar
         // that can hold its period.
-        let to_records = |days: Option<usize>| {
-            days.map(|days| days * 24 * records_per_hour as usize)
-        };
+        let to_records =
+            |days: Option<usize>| days.map(|days| days * 24 * records_per_hour as usize);
         (
             to_records(data_period_day_count(data_period, false)),
             to_records(data_period_day_count(data_period, true)),
         )
     };
-    let count_matches = |count: usize, expected: Option<usize>| {
-        expected.is_some_and(|expected| count == expected)
-    };
+    let count_matches =
+        |count: usize, expected: Option<usize>| expected.is_some_and(|expected| count == expected);
     if !count_matches(records.len(), expected_standard)
         && !count_matches(records.len(), expected_leap)
     {
         let expected = |expected: Option<usize>| match expected {
             Some(count) => count.to_string(),
-            None => "no record count (the calendar cannot hold the period's dates)"
-                .to_string(),
+            None => "no record count (the calendar cannot hold the period's dates)".to_string(),
         };
         return Err(WeatherError::Validation(format!(
             "EPW record count must be {} or {} for the data period {} (a complete \

@@ -186,7 +186,10 @@ fn days_in_month(year: i32, month: u32) -> u32 {
     (next - this).num_days() as u32
 }
 
-fn compute_period_end(start: DateTime<Tz>, cycle: BillingCycle) -> Result<DateTime<Tz>, HaresError> {
+fn compute_period_end(
+    start: DateTime<Tz>,
+    cycle: BillingCycle,
+) -> Result<DateTime<Tz>, HaresError> {
     period_end_from_anchor(start, start.day(), cycle)
 }
 
@@ -919,7 +922,8 @@ mod tests {
     #[test]
     fn demand_window_peak_tracking() {
         let mut state =
-            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0)
+                .expect("the billing state constructs");
         // 15-min window with 5-min interval = 3 samples
         // Push sequence: 2000, 4000, 6000 -> avg 4000, then 8000, 10000,
         // 12000 -> avg 10000 (the window's samples are W).
@@ -932,7 +936,8 @@ mod tests {
     #[test]
     fn billing_state_energy_accumulation() {
         let mut state =
-            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0)
+                .expect("the billing state constructs");
         // Constant 1 kW for 1 hour (one step of 3600s): 3.6e6 J, 0.10 $/kWh.
         state.update(step(1000.0, 3600.0, 0.10, 0.0));
         assert!((state.cumulative_import_j - 3.6e6).abs() < 1e-6);
@@ -949,7 +954,8 @@ mod tests {
     #[test]
     fn billing_step_fields_are_si_watts_and_joules() {
         let mut state =
-            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0)
+                .expect("the billing state constructs");
         // The window's capacity is 15 min x 60 / 3600 s = 4 samples;
         // four steps fill it.
         for _ in 0..4 {
@@ -979,7 +985,8 @@ mod tests {
     #[test]
     fn billing_state_export_accumulation() {
         let mut state =
-            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 3600, 0, 0)
+                .expect("the billing state constructs");
         // Constant -2 kW for 1 hour: 7.2e6 J exported.
         state.update(step(-2000.0, 3600.0, 0.10, 0.05));
         assert!((state.cumulative_import_j).abs() < 1e-10);
@@ -990,7 +997,8 @@ mod tests {
     #[test]
     fn billing_period_closes_at_month_end() {
         let start = make_dt(2025, 1, 1);
-        let state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+        let state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, 0, 0)
+            .expect("the billing state constructs");
         let expected_end = make_dt(2025, 2, 1);
         assert_eq!(state.period_end, expected_end);
     }
@@ -1004,7 +1012,8 @@ mod tests {
             3600,
             1, // need at least 1 month lookback to retain prior peak
             0,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
         state.update(step(5.0, 3600.0, 0.10, 0.0));
         assert!(state.cumulative_import_j > 0.0);
         assert!(state.peak_demand_w > 0.0);
@@ -1032,7 +1041,8 @@ mod tests {
             3600,
             ratchet.lookback_months.into(),
             0,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
         // Simulate a high prior peak
         state.prior_peaks_w.push_back(10.0);
         // Current peak is only 2 kW
@@ -1055,7 +1065,8 @@ mod tests {
             300,
             ratchet.lookback_months.into(),
             0,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
         state.prior_peaks_w.push_back(5.0);
         for _ in 0..3 {
             state.update(step(10.0, 300.0, 0.0, 0.0));
@@ -1074,7 +1085,8 @@ mod tests {
             3600,
             12, // 12-month lookback
             0,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
         for month in 1..=13u32 {
             state.peak_demand_w = month as f64;
             let next_start = if month <= 11 {
@@ -1102,7 +1114,8 @@ mod tests {
             3600,
             ratchet.lookback_months.into(),
             0,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
         // Add 6 months of peaks: [5, 10, 15, 20, 25, 30]
         for peak in [5.0, 10.0, 15.0, 20.0, 25.0, 30.0] {
             state.prior_peaks_w.push_back(peak);
@@ -1117,7 +1130,8 @@ mod tests {
     #[test]
     fn compute_period_end_jan31_to_feb28() {
         let start = make_dt(2025, 1, 31);
-        let end = compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
+        let end =
+            compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
         // Feb 2025 has 28 days; day clamped to 28.
         assert_eq!(end.month(), 2);
         assert_eq!(end.day(), 28);
@@ -1126,7 +1140,8 @@ mod tests {
     #[test]
     fn compute_period_end_jan29_leap_year() {
         let start = New_York.with_ymd_and_hms(2024, 1, 29, 0, 0, 0).unwrap();
-        let end = compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
+        let end =
+            compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
         // Feb 2024 has 29 days (leap year); day 29 fits.
         assert_eq!(end.month(), 2);
         assert_eq!(end.day(), 29);
@@ -1135,7 +1150,8 @@ mod tests {
     #[test]
     fn compute_period_end_dec_to_jan() {
         let start = make_dt(2025, 12, 15);
-        let end = compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
+        let end =
+            compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
         assert_eq!(end.year(), 2026);
         assert_eq!(end.month(), 1);
         assert_eq!(end.day(), 15);
@@ -1144,7 +1160,8 @@ mod tests {
     #[test]
     fn billing_custom_cycle_period_end() {
         let start = make_dt(2025, 1, 1);
-        let state = BillingState::new(start, BillingCycle::Custom(14), 15, 3600, 0, 0).expect("the billing state constructs");
+        let state = BillingState::new(start, BillingCycle::Custom(14), 15, 3600, 0, 0)
+            .expect("the billing state constructs");
         let expected_end = make_dt(2025, 1, 15);
         assert_eq!(state.period_end, expected_end);
     }
@@ -1152,7 +1169,8 @@ mod tests {
     #[test]
     fn compute_period_end_feb29_to_mar() {
         let start = New_York.with_ymd_and_hms(2024, 2, 29, 0, 0, 0).unwrap();
-        let end = compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
+        let end =
+            compute_period_end(start, BillingCycle::Monthly).expect("the period end resolves");
         assert_eq!(end.month(), 3);
         assert_eq!(end.day(), 29);
     }
@@ -1191,7 +1209,8 @@ mod tests {
                 3600,
                 0,
                 0,
-            ).expect("the billing state constructs");
+            )
+            .expect("the billing state constructs");
             for (year, month, day) in expected {
                 let expected_end = New_York
                     .with_ymd_and_hms(year, month, day, 0, 0, 0)
@@ -1241,7 +1260,8 @@ mod tests {
     #[test]
     fn billing_state_snapshot_carries_the_anchor_day() {
         let mut state =
-            BillingState::new(make_dt(2025, 1, 31), BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 31), BillingCycle::Monthly, 15, 3600, 0, 0)
+                .expect("the billing state constructs");
         assert_eq!(state.period_end, make_dt(2025, 2, 28));
         state.reset(state.period_end).expect("the period resets");
 
@@ -1249,7 +1269,9 @@ mod tests {
         let mut restored =
             BillingState::from_snapshot(snapshot, New_York, 0).expect("the billing state restores");
         assert_eq!(restored.period_end, make_dt(2025, 3, 31));
-        restored.reset(restored.period_end).expect("the period resets");
+        restored
+            .reset(restored.period_end)
+            .expect("the period resets");
         assert_eq!(restored.period_end, make_dt(2025, 4, 30));
     }
 
@@ -1266,7 +1288,8 @@ mod tests {
         let start = chrono_tz::America::Santiago
             .with_ymd_and_hms(2025, 8, 7, 0, 0, 0)
             .unwrap();
-        let mut state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, 0, 0).expect("the billing state constructs");
+        let mut state = BillingState::new(start, BillingCycle::Monthly, 15, 3600, 0, 0)
+            .expect("the billing state constructs");
         let expected_end = chrono_tz::America::Santiago
             .with_ymd_and_hms(2025, 9, 7, 1, 0, 0)
             .unwrap();
@@ -1357,7 +1380,8 @@ mod tests {
             3600,
             ratchet.lookback_months.into(),
             3,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
 
         // Push three billing periods of history for period 1 via reset().
         // Period 1 peaks: 10.0, 15.0, 20.0 → max of last 3 = 20.0.
@@ -1405,7 +1429,8 @@ mod tests {
             3600,
             ratchet.lookback_months.into(),
             0,
-        ).expect("the billing state constructs");
+        )
+        .expect("the billing state constructs");
 
         // Simulate 30 billing periods; prior_peaks_w must not exceed the cap.
         for _ in 0..30 {
@@ -1602,7 +1627,8 @@ mod tests {
     fn billing_state_post_reset_spike_does_not_set_peak_demand() {
         // 15-minute demand window with 5-minute intervals → capacity = 3
         let mut state =
-            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0)
+                .expect("the billing state constructs");
         // Push a spike in the first post-reset step (count=1, window not full).
         state.update(step(100.0, 300.0, 0.0, 0.0));
         assert!(
@@ -1627,7 +1653,8 @@ mod tests {
     fn billing_state_sustained_peak_across_full_window_is_captured() {
         // 15-minute demand window with 5-minute intervals → capacity = 3
         let mut state =
-            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0).expect("the billing state constructs");
+            BillingState::new(make_dt(2025, 1, 1), BillingCycle::Monthly, 15, 300, 0, 0)
+                .expect("the billing state constructs");
         // Push three reads of 10 kW → window fills, avg = 10, peak = 10.
         for _ in 0..3 {
             state.update(step(10.0, 300.0, 0.0, 0.0));

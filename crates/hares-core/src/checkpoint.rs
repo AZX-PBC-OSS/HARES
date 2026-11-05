@@ -159,11 +159,12 @@ use serde::{Deserialize, Serialize};
 /// step's imbalance, and a restore without the section handed them the
 /// rebuild's warm-up values. The thermal domain carries the last step's
 /// active ventilation-flow variant, which the first post-restore
-/// ideal-capacity solve reads before the envelope re-selects it: without
-/// it that solve ran on the rebuilding solver's model, not the written
-/// run's. Checkpoints written by v25 builds are rejected by the version
-/// gate.
-pub const CHECKPOINT_VERSION: u32 = 26;
+/// ideal-capacity solve reads before the envelope re-selects it, and the
+/// mechanical ventilation forced flow the same solve reads (both are
+/// per-step propagations from the ventilation equipment a restore lands
+/// between). Checkpoints written by v26 builds are rejected by the
+/// version gate.
+pub const CHECKPOINT_VERSION: u32 = 27;
 
 /// One equipment's checkpointed state, identity-keyed.
 ///
@@ -452,6 +453,7 @@ mod tests {
             active_flow_model: None,
             sensible_recovery_efficiency: 0.0,
             latent_recovery_efficiency: 0.0,
+            ventilation_flow_m3_s: 0.0,
             ideal_capacity_failure_counts: vec![],
             last_good_capacity_w: vec![],
             non_hvac_zone_input_w: vec![],
@@ -488,6 +490,7 @@ mod tests {
                 active_flow_model: Some(1),
                 sensible_recovery_efficiency: 0.34,
                 latent_recovery_efficiency: 0.12,
+                ventilation_flow_m3_s: 0.0175,
                 ideal_capacity_failure_counts: vec![(ZoneId(1), 2)],
                 last_good_capacity_w: vec![(ZoneId(1), 5537.98)],
                 non_hvac_zone_input_w: vec![(ZoneId(1), 412.5)],
@@ -675,9 +678,9 @@ mod tests {
     /// The checkpoint schema `PINNED_VERSION` reads, as the SHA-256 of
     /// [`type_schema_with`] over `DwellingCheckpoint`, its nested enums
     /// traced before the root so every variant is recorded.
-    const PINNED_VERSION: u32 = 26;
+    const PINNED_VERSION: u32 = 27;
     const PINNED_SCHEMA_SHA256: &str =
-        "0af082baf47cc3fc4548f7c57d69e6f9d22116981bbe355d05ff183b67d57e05";
+        "edc7045b3281f020746ea2ff25eef954929e81e6c1ba6270c6bd325d8650ef78";
 
     /// The checkpoint's serde schema, including the embedded
     /// `ThermalSnapshot` and every type it nests, is the one pinned for the
@@ -1188,7 +1191,9 @@ mod tests {
         .expect("evaluator");
         for i in 0..30u32 {
             let step_end = start + chrono::Duration::hours(i as i64 + 1);
-            evaluator.step(2.5, 0.0, 3600.0, step_end).expect("the step folds");
+            evaluator
+                .step(2.5, 0.0, 3600.0, step_end)
+                .expect("the step folds");
         }
         let blob = evaluator
             .snapshot_state()

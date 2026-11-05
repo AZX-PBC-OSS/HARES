@@ -603,8 +603,17 @@ pub(crate) fn parse_schedule_csv_str(
 /// `time_stamp` and `date_time` normalize into the vocabulary without
 /// being accepted spellings.
 const TIME_LIKE_HEADERS: &[&str] = &[
-    "time", "timestamp", "hour", "hourofyear", "date", "datetime", "dateandtime", "localtime",
-    "epoch", "epochtime", "unixtime",
+    "time",
+    "timestamp",
+    "hour",
+    "hourofyear",
+    "date",
+    "datetime",
+    "dateandtime",
+    "localtime",
+    "epoch",
+    "epochtime",
+    "unixtime",
 ];
 
 fn time_like_header(header: &str) -> bool {

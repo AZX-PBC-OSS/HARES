@@ -10,7 +10,7 @@ Equipment parameters that vary over time (power draws, setpoints, deadbands, eve
 
 A schedule CSV's first row is its header. One column may be the time column; the accepted time-column names are `timestamp` and `time` (case-insensitive). With a time column, each row's timestamp parses as RFC 3339 (the file's own offsets honoured) and the step size infers from the timestamps. With no time column, the file is index-based: the row count must evenly divide a standard year (8760 hourly rows, 525600 minutes, or the inclusive-end `n % 8760 == 1` form OCHRE's `set_annual_index` allows), and the timestamps synthesize from row order.
 
-A header that names a time column under any other spelling — an `Hour` column, a `date_time` epoch column, a `Time Stamp` spelling — is a contract error naming the accepted names, not a data column: its numeric values would divide the year and the file would silently accept with inferred timestamps. Every other column is data, normalized the way the required-column match runs.
+A header that names a time column under any other spelling (an `Hour` column, a `date_time` epoch column, a `Time Stamp` spelling) is a contract error naming the accepted names, not a data column: its numeric values would divide the year and the file would silently accept with inferred timestamps. Every other column is data, normalized the way the required-column match runs.
 
 ## Variants
 

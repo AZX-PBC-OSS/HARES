@@ -359,6 +359,12 @@ pub struct Ventilation {
     // before the thermal solver integrates.
     effective_sensible_effectiveness: f64,
     effective_latent_effectiveness: f64,
+    /// The step's effective forced flow (m³/s): the rated flow times the
+    /// schedule fraction, zero on the off and zero-flow branches. The
+    /// dwelling propagates it to the envelope's forced ventilation beside
+    /// the recovery effectiveness, so the load, the fan energy and the
+    /// reported flow move together.
+    effective_flow_rate_m3_s: f64,
 
     // Bypass: when outdoor temp is within comfort range, bypass recovery (free cooling).
     bypass_temp_min_c: f64,
@@ -435,6 +441,7 @@ impl Ventilation {
             sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
             latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
             effective_sensible_effectiveness: DEFAULT_SENSIBLE_EFFECTIVENESS,
+            effective_flow_rate_m3_s: DEFAULT_FLOW_RATE_M3_S,
             effective_latent_effectiveness: DEFAULT_LATENT_EFFECTIVENESS,
             bypass_temp_min_c: DEFAULT_BYPASS_TEMP_MIN_C,
             bypass_temp_max_c: DEFAULT_BYPASS_TEMP_MAX_C,
@@ -560,6 +567,10 @@ impl Ventilation {
         // correct rated defaults rather than the hard-coded new() values.
         self.effective_sensible_effectiveness = self.sensible_effectiveness;
         self.effective_latent_effectiveness = self.latent_effectiveness;
+        // The flow's pre-first-step form is the rated flow: no schedule
+        // fraction has been read yet, and the constant source's fraction
+        // below is what the first step's propagation will carry.
+        self.effective_flow_rate_m3_s = self.flow_rate_m3_s * schedule_frac;
 
         // Ventilation exchanges the conditioned zone's air with outdoors.
         let zone = resolve_served_zone(config, self.zone_id)?;
@@ -692,6 +703,9 @@ impl Equipment for Ventilation {
             // is not occurring.
             self.effective_sensible_effectiveness = 0.0;
             self.effective_latent_effectiveness = 0.0;
+            // A stopped fan moves no air: the envelope's forced flow goes
+            // with the effectiveness to zero.
+            self.effective_flow_rate_m3_s = 0.0;
 
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
@@ -757,8 +771,16 @@ impl Equipment for Ventilation {
 
         let schedule_frac = self.schedule_source.value_at(env)?.clamp(0.0, 1.0);
         let effective_flow_rate_m3_s = self.flow_rate_m3_s * schedule_frac;
+        // The step's forced flow the dwelling propagates to the envelope:
+        // one value governs the fan energy, the reported flow and the
+        // ventilation load.
+        self.effective_flow_rate_m3_s = effective_flow_rate_m3_s;
 
         if effective_flow_rate_m3_s <= 0.0 {
+            // A zero flow moves no air: the effective flow is exactly zero
+            // for the propagation, whatever the rated-times-fraction product
+            // rounded to.
+            self.effective_flow_rate_m3_s = 0.0;
             self.telemetry.set(tk::ELECTRIC_KW, 0.0);
             self.telemetry.set(tk::REACTIVE_POWER_KVAR, 0.0);
             self.telemetry.set(tk::FAN_POWER_W, 0.0);
@@ -974,6 +996,10 @@ impl Equipment for Ventilation {
             self.effective_sensible_effectiveness,
             self.effective_latent_effectiveness,
         ))
+    }
+
+    fn effective_ventilation_flow_m3_s(&self) -> Option<f64> {
+        Some(self.effective_flow_rate_m3_s)
     }
 
     fn resolved_zip(&self) -> Option<ResolvedZip> {

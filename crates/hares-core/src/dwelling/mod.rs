@@ -7668,17 +7668,21 @@ impl Dwelling {
         }
 
         // Step 3c: propagate per-timestep ventilation recovery effectiveness
-        // from equipment to the thermal solver config.  The Ventilation equipment
-        // computes effective sensible/latent effectiveness accounting for bypass
-        // and defrost derating; the thermal solver's infiltration module must see
-        // these dynamic values (not the static rated ones) to correctly compute
-        // the ventilation sensible/latent load.
+        // and forced flow from equipment to the thermal solver config.  The
+        // Ventilation equipment computes effective sensible/latent
+        // effectiveness accounting for bypass and defrost derating, and its
+        // effective forced flow (the rated flow times the schedule
+        // fraction); the thermal solver's infiltration module must see
+        // these dynamic values (not the static rated ones) to correctly
+        // compute the ventilation sensible/latent load and its flow.
         //
         // EnergyPlus Engineering Reference, "Heat Exchangers" chapter:
         // per-timestep effectiveness application with bypass suspending heat
         // transfer (effectiveness = 0).  Using stale rated values during bypass
         // underestimates the ventilation load by a factor equal to
-        // 1 / (1 - rated_eff), e.g. 4× for a 75% effective HRV.
+        // 1 / (1 - rated_eff), e.g. 4× for a 75% effective HRV. The forced
+        // flow is the same one-source rule: a fan scheduled to 12 of 24
+        // hours moves air 12 hours, and its envelope load follows.
         for eq in &self.equipment {
             if let Some((eff_s, eff_l)) = eq.effective_ventilation_effectiveness() {
                 self.thermal_solver
@@ -7696,6 +7700,23 @@ impl Dwelling {
                     eff_s,
                     eff_l,
                     "ventilation effectiveness propagated to thermal solver config"
+                );
+            }
+            if let Some(flow_m3_s) = eq.effective_ventilation_flow_m3_s() {
+                self.thermal_solver
+                    .set_ventilation_flow(flow_m3_s)
+                    .map_err(|err| {
+                        HaresError::Envelope(format!(
+                            "ventilation flow from '{}' rejected: {err}",
+                            eq.descriptor().name
+                        ))
+                    })?;
+                #[cfg(feature = "observe")]
+                tracing::debug!(
+                    equipment = %eq.descriptor().name,
+                    mode = ?eq.core_output().state.operating_mode,
+                    flow_m3_s,
+                    "ventilation flow propagated to thermal solver config"
                 );
             }
         }

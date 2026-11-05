@@ -27,7 +27,13 @@ use crate::state_space::ZERO_GAIN_EPSILON;
 /// schedule-driven selection is mutable solver state the first post-restore
 /// solve depends on, so a snapshot without it handed that solve the
 /// rebuilding solver's selection instead of the written run's.
-pub const THERMAL_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+///
+/// v3: the mechanical ventilation forced flow the next step's coupling
+/// reads, as last set by [`ThermalSolver::set_ventilation_flow`]. The
+/// first post-restore ideal-capacity solve reads it for the same reason
+/// the recovery efficiencies ride the snapshot: the propagation from the
+/// equipment runs inside a step, and a restore lands between steps.
+pub const THERMAL_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 /// Captured thermal state for checkpoint save/restore: every piece of
 /// mutable solver state that a step's or an ideal-capacity solve's result
@@ -66,6 +72,9 @@ pub struct ThermalSnapshot {
     pub sensible_recovery_efficiency: f64,
     /// Latent counterpart of `sensible_recovery_efficiency`.
     pub latent_recovery_efficiency: f64,
+    /// Mechanical ventilation forced flow (m³/s) the next step's coupling
+    /// reads, as last set by [`ThermalSolver::set_ventilation_flow`].
+    pub ventilation_flow_m3_s: f64,
     /// Consecutive ideal-capacity solve failures per zone, sorted by zone.
     pub ideal_capacity_failure_counts: Vec<(ZoneId, usize)>,
     /// Last successfully solved ideal capacity (W) per zone, sorted by zone:
@@ -149,6 +158,7 @@ impl ThermalSolver {
             active_flow_model: self.active_flow_model,
             sensible_recovery_efficiency: self.config.ventilation.sensible_recovery_efficiency,
             latent_recovery_efficiency: self.config.ventilation.latent_recovery_efficiency,
+            ventilation_flow_m3_s: self.config.ventilation_flow_m3_s,
             ideal_capacity_failure_counts: sorted_zone_pairs(&self.ideal_capacity_failure_counts),
             last_good_capacity_w: sorted_zone_pairs(&self.last_good_capacity_w),
             non_hvac_zone_input_w: sorted_zone_pairs(&self.non_hvac_zone_input_w),
@@ -204,6 +214,12 @@ impl ThermalSolver {
             snap.sensible_recovery_efficiency,
             snap.latent_recovery_efficiency,
         )?;
+        if !snap.ventilation_flow_m3_s.is_finite() || snap.ventilation_flow_m3_s < 0.0 {
+            return Err(invalid(format!(
+                "ventilation_flow_m3_s {} must be finite and >= 0",
+                snap.ventilation_flow_m3_s
+            )));
+        }
         self.validate_zone_pairs(
             "ideal_capacity_failure_counts",
             &snap.ideal_capacity_failure_counts,
@@ -326,6 +342,7 @@ impl ThermalSolver {
         }
         self.config.ventilation.sensible_recovery_efficiency = snap.sensible_recovery_efficiency;
         self.config.ventilation.latent_recovery_efficiency = snap.latent_recovery_efficiency;
+        self.config.ventilation_flow_m3_s = snap.ventilation_flow_m3_s;
         self.ideal_capacity_failure_counts.clear();
         self.ideal_capacity_failure_counts
             .extend(snap.ideal_capacity_failure_counts.iter().copied());

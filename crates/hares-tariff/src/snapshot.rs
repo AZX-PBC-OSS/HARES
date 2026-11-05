@@ -302,7 +302,9 @@ mod tests {
         let mut original = make_evaluator();
         for i in 0..100 {
             let step_end = start + Duration::seconds((i as i64 + 1) * 3600);
-            original.step(2.0 + i as f64 * 0.01, 0.0, 3600.0, step_end).expect("the step folds");
+            original
+                .step(2.0 + i as f64 * 0.01, 0.0, 3600.0, step_end)
+                .expect("the step folds");
         }
 
         let snapshot = original.snapshot_state();
@@ -314,7 +316,9 @@ mod tests {
         // And the two evaluators keep stepping bitwise identically.
         for i in 100..200 {
             let step_end = start + Duration::seconds((i as i64 + 1) * 3600);
-            let a = original.step(3.0, 0.0, 3600.0, step_end).expect("the step folds");
+            let a = original
+                .step(3.0, 0.0, 3600.0, step_end)
+                .expect("the step folds");
             let b = restored
                 .step(3.0, 0.0, 3600.0, step_end)
                 .expect("the step folds");
@@ -561,7 +565,9 @@ mod tests {
         for i in 0..48 {
             let step_end = New_York.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap()
                 + Duration::seconds((i as i64 + 1) * 3600);
-            evaluator.step(2.5 + i as f64 * 0.031, 0.25, 3600.0, step_end).expect("the step folds");
+            evaluator
+                .step(2.5 + i as f64 * 0.031, 0.25, 3600.0, step_end)
+                .expect("the step folds");
         }
         let snapshot = evaluator.snapshot_state();
         let blob = snapshot.to_blob().expect("encode");

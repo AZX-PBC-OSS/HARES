@@ -4113,17 +4113,14 @@ mod tests {
     fn deeply_nested_document_is_a_typed_error_not_a_crash() {
         let depth = 100_000;
         let xml = format!("{}{}", "<a>".repeat(depth), "</a>".repeat(depth));
-        let err = parse_xml_document(&xml)
-            .expect_err("nesting past the depth cap must fail the parse");
+        let err =
+            parse_xml_document(&xml).expect_err("nesting past the depth cap must fail the parse");
         let shown = format!("{err}");
         assert!(
             shown.contains("depth"),
             "the error names the depth: {shown}"
         );
-        assert!(
-            shown.contains('a'),
-            "the error names the element: {shown}"
-        );
+        assert!(shown.contains('a'), "the error names the element: {shown}");
     }
 
     /// An attribute the reader rejects (a duplicated name) or a value it

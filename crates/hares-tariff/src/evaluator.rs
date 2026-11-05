@@ -632,7 +632,10 @@ impl TariffEvaluator {
     /// A period opened at its own boundary multiplies nothing, so runs that
     /// never attach or replace a tariff close periods exactly as this
     /// proration never touches them.
-    fn close_period(&mut self, close_time: DateTime<Tz>) -> Result<BillingPeriodSummary, HaresError> {
+    fn close_period(
+        &mut self,
+        close_time: DateTime<Tz>,
+    ) -> Result<BillingPeriodSummary, HaresError> {
         let period_start = self.billing_state.period_start;
         let period_end = self.billing_state.period_end;
         let segments = period_month_segments(period_start, period_end)?;
@@ -803,10 +806,7 @@ impl TariffEvaluator {
                     // Coincident demand: use each rate's own ratchet, not a global one.
                     None => self.billing_state.effective_peak_with_ratchet(&dr.ratchet),
                     Some(name) => {
-                        let Some(idx) = self
-                            .period_name_table
-                            .iter()
-                            .position(|n| n == name)
+                        let Some(idx) = self.period_name_table.iter().position(|n| n == name)
                         else {
                             return Err(HaresError::Tariff(format!(
                                 "demand rate's period '{name}' is not in the evaluator's \
@@ -1949,7 +1949,8 @@ mod tests {
 
         // Accumulate some load so finalize() has something to return.
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(5.0, 0.0, interval as f64, step_end).expect("the step folds");
+        ev.step(5.0, 0.0, interval as f64, step_end)
+            .expect("the step folds");
 
         let first = ev.finalize(end).expect("the finalize resolves");
         assert!(first.is_some(), "first finalize() should return Some");
@@ -1979,10 +1980,12 @@ mod tests {
         let steps_15d = 15 * 24;
         for i in 0..steps_15d {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
+            ev.step(1000.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
 
-        let summary = ev.finalize(sim_end)
+        let summary = ev
+            .finalize(sim_end)
             .expect("the finalize resolves")
             .expect("should have charges");
         // 15 elapsed days × $1/day = $15
@@ -2014,10 +2017,12 @@ mod tests {
         let total = ev.total_steps();
         for i in 0..(total - 1) {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
+            ev.step(1000.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
 
-        let summary = ev.finalize(end)
+        let summary = ev
+            .finalize(end)
             .expect("the finalize resolves")
             .expect("should have charges");
         // Full period: 31 days × $1/day = $31
@@ -2041,7 +2046,9 @@ mod tests {
 
         // The single valid step.
         let step_end = start + Duration::seconds(interval as i64);
-        let _ = ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
+        let _ = ev
+            .step(1000.0, 0.0, interval as f64, step_end)
+            .expect("the step folds");
 
         // Any subsequent call must return None -- the evaluator is finished.
         let result = ev
@@ -2090,7 +2097,9 @@ mod tests {
 
         // Run the single step to completion.
         let step_end = start + Duration::seconds(interval as i64);
-        let _ = ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
+        let _ = ev
+            .step(1000.0, 0.0, interval as f64, step_end)
+            .expect("the step folds");
         assert!(ev.is_finished());
 
         // Accessors must not panic even after step() has finished.
@@ -2120,12 +2129,14 @@ mod tests {
         // Push 6 steps of 10 kW (30 min at 5-min intervals).
         for i in 0..6 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(10_000.0, 0.0, interval as f64, t).expect("the step folds");
+            ev.step(10_000.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
         // Then push low load.
         for i in 6..12 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(1000.0, 0.0, interval as f64, t).expect("the step folds");
+            ev.step(1000.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
 
         // The peak should be ~10 kW (the 30-min average of the first 6 steps).
@@ -2157,7 +2168,8 @@ mod tests {
         // Push 3 steps of 10 kW (15 min at 5-min intervals).
         for i in 0..3 {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(10.0, 0.0, interval as f64, t).expect("the step folds");
+            ev.step(10.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
         let peak = ev.billing_state().peak_demand_w();
         assert!(
@@ -2193,7 +2205,8 @@ mod tests {
 
         // Step with zero load -- no energy, no demand.
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(0.0, 0.0, interval as f64, step_end).expect("the step folds");
+        ev.step(0.0, 0.0, interval as f64, step_end)
+            .expect("the step folds");
 
         let summary = ev
             .finalize(end)
@@ -2213,7 +2226,8 @@ mod tests {
         let interval = 3600u32;
         let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
         let step_end = start + Duration::seconds(interval as i64);
-        ev.step(1000.0, 0.0, interval as f64, step_end).expect("the step folds");
+        ev.step(1000.0, 0.0, interval as f64, step_end)
+            .expect("the step folds");
 
         assert!(!ev.is_finished());
         let _ = ev.finalize(end).expect("the finalize resolves");
@@ -2499,7 +2513,8 @@ mod tests {
         // Ten days of load, then the switch mid-period.
         for i in 0..240 {
             let step_end = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(2000.0, 0.0, interval as f64, step_end).expect("the step folds");
+            ev.step(2000.0, 0.0, interval as f64, step_end)
+                .expect("the step folds");
         }
         let switch = start + Duration::seconds(240 * 3600);
         let bill = ev
@@ -2517,7 +2532,11 @@ mod tests {
         assert_eq!(bill.fixed_charge_usd.to_bits(), expected_fixed.to_bits());
 
         // The second close returns nothing: the period closed.
-        assert!(ev.close_open_period(switch).expect("the close resolves").is_none());
+        assert!(
+            ev.close_open_period(switch)
+                .expect("the close resolves")
+                .is_none()
+        );
     }
 
     // A period that folded no step holds nothing billable: closing it
@@ -2529,7 +2548,11 @@ mod tests {
         let interval = 3600u32;
         let mut ev = make_evaluator(flat_tariff(0.12), start, end, interval);
         let switch = start + Duration::seconds(48 * 3600);
-        assert!(ev.close_open_period(switch).expect("the close resolves").is_none());
+        assert!(
+            ev.close_open_period(switch)
+                .expect("the close resolves")
+                .is_none()
+        );
     }
 
     // A finalize of a period the tariff joined mid-way bills the same fixed
@@ -2565,9 +2588,12 @@ mod tests {
         finalizing.activate_at(attach).expect("the attach resolves");
         for i in 0..hours {
             let t = attach + Duration::seconds((i as i64 + 1) * interval as i64);
-            finalizing.step(2.0, 0.0, interval as f64, t).expect("the step folds");
+            finalizing
+                .step(2.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
-        let finalized = finalizing.finalize(sim_end)
+        let finalized = finalizing
+            .finalize(sim_end)
             .expect("the finalize resolves")
             .expect("the finalize bills");
 
@@ -2636,9 +2662,11 @@ mod tests {
         let hours = (sim_end - start).num_hours() as usize;
         for i in 0..hours {
             let t = start + Duration::seconds((i as i64 + 1) * interval as i64);
-            ev.step(2000.0, 0.0, interval as f64, t).expect("the step folds");
+            ev.step(2000.0, 0.0, interval as f64, t)
+                .expect("the step folds");
         }
-        let finalized = ev.finalize(sim_end)
+        let finalized = ev
+            .finalize(sim_end)
             .expect("the finalize resolves")
             .expect("the finalize bills");
 
@@ -2781,10 +2809,12 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 1, 1, 6, 0, 0).unwrap();
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
-        ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
+        ev.step(1000.0, 0.0, 3600.0, step_end)
+            .expect("the step folds");
 
         // The energy cost should be 1 kWh * $1.50 = $1.50
-        let summary = ev.finalize(step_end)
+        let summary = ev
+            .finalize(step_end)
             .expect("the finalize resolves")
             .expect("should return summary");
         assert!(
@@ -2805,9 +2835,11 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 1, 1, 5, 0, 0).unwrap();
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
-        ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
+        ev.step(1000.0, 0.0, 3600.0, step_end)
+            .expect("the step folds");
 
-        let summary = ev.finalize(step_end)
+        let summary = ev
+            .finalize(step_end)
             .expect("the finalize resolves")
             .expect("should return summary");
         assert!(
@@ -2834,10 +2866,12 @@ mod tests {
 
         for i in 0..12 {
             let step_end = start + Duration::seconds((i as i64 + 1) * 3600);
-            ev.step(1000.0, 0.0, 3600.0, step_end).expect("the step folds");
+            ev.step(1000.0, 0.0, 3600.0, step_end)
+                .expect("the step folds");
         }
 
-        let summary = ev.finalize(end)
+        let summary = ev
+            .finalize(end)
             .expect("the finalize resolves")
             .expect("should return summary");
         // Hours 0-5: standard rate $0.10 → 6 kWh * $0.10 = $0.60
@@ -2924,9 +2958,11 @@ mod tests {
         let start = New_York.with_ymd_and_hms(2025, 1, 1, 12, 0, 0).unwrap();
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
-        ev.step(5000.0, 2000.0, 3600.0, step_end).expect("the step folds");
+        ev.step(5000.0, 2000.0, 3600.0, step_end)
+            .expect("the step folds");
 
-        let summary = ev.finalize(step_end)
+        let summary = ev
+            .finalize(step_end)
             .expect("the finalize resolves")
             .expect("should return summary");
         // 3 kWh house @ $0.30 = $0.90, 2 kWh EV @ $0.06 = $0.12
@@ -2960,9 +2996,11 @@ mod tests {
         let mut ev = make_evaluator(tariff, start, start + Duration::hours(1), 3600);
         let step_end = start + Duration::hours(1);
         // 5 kW house load, 0 kW EV
-        ev.step(5000.0, 0.0, 3600.0, step_end).expect("the step folds");
+        ev.step(5000.0, 0.0, 3600.0, step_end)
+            .expect("the step folds");
 
-        let summary = ev.finalize(step_end)
+        let summary = ev
+            .finalize(step_end)
             .expect("the finalize resolves")
             .expect("should return summary");
         // 5 kWh @ $0.30 = $1.50
@@ -3516,7 +3554,10 @@ mod tests {
         let mut ev =
             TariffEvaluator::new(tariff.clone(), jul, jul + Duration::hours(1), 3600).unwrap();
         ev.step(1000.0, 0.0, 3600.0, jul).expect("the step folds");
-        let summary = ev.finalize(jul + Duration::hours(1)).expect("the finalize resolves").expect("the summary");
+        let summary = ev
+            .finalize(jul + Duration::hours(1))
+            .expect("the finalize resolves")
+            .expect("the summary");
         assert!((summary.energy_charge_usd - 0.30).abs() < 0.01);
 
         // April (shoulder): 1 kWh → $0.20
@@ -3524,7 +3565,10 @@ mod tests {
         let mut ev =
             TariffEvaluator::new(tariff.clone(), apr, apr + Duration::hours(1), 3600).unwrap();
         ev.step(1000.0, 0.0, 3600.0, apr).expect("the step folds");
-        let summary = ev.finalize(apr + Duration::hours(1)).expect("the finalize resolves").expect("the summary");
+        let summary = ev
+            .finalize(apr + Duration::hours(1))
+            .expect("the finalize resolves")
+            .expect("the summary");
         assert!((summary.energy_charge_usd - 0.20).abs() < 0.01);
 
         // December (winter): 1 kWh → $0.10
@@ -3532,7 +3576,10 @@ mod tests {
         let mut ev =
             TariffEvaluator::new(tariff.clone(), dec, dec + Duration::hours(1), 3600).unwrap();
         ev.step(1000.0, 0.0, 3600.0, dec).expect("the step folds");
-        let summary = ev.finalize(dec + Duration::hours(1)).expect("the finalize resolves").expect("the summary");
+        let summary = ev
+            .finalize(dec + Duration::hours(1))
+            .expect("the finalize resolves")
+            .expect("the summary");
         assert!((summary.energy_charge_usd - 0.10).abs() < 0.01);
     }
 
@@ -3647,7 +3694,6 @@ mod tests {
             summary.demand_charge_usd
         );
     }
-
 
     // A demand rate whose period name the evaluator's own table lacks is
     // a typed error naming the rate, not an expect panic on the lookup.
