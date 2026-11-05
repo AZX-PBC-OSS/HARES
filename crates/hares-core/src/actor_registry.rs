@@ -243,6 +243,55 @@ const EV_DRIVER_PARAMS: ActorParamSchema = &[
         kind: ActorParamKind::Text,
         required: false,
     },
+    // The behavior's SI parameters (`EvDriverParams::from_registry_config`,
+    // the same names docs/python.md publishes): every one the factory reads
+    // must be declared, or a legitimate configured value is refused as an
+    // unknown key.
+    ActorParamDecl {
+        name: "event_day_ratio",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "daily_drive_distance_mean_m",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "fuel_economy_j_per_m",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "capacity_j",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "max_charge_w",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "average_speed_m_per_s",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "range_anxiety_distance_m",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "away_charge_fraction",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
+    ActorParamDecl {
+        name: "away_charge_power_w",
+        kind: ActorParamKind::F64,
+        required: false,
+    },
 ];
 
 const DR_COMPLIANCE_PARAMS: ActorParamSchema = &[
@@ -1751,6 +1800,39 @@ mod schema_tests {
                 "{actor_type}: the error names the required parameter: {message}"
             );
         }
+    }
+
+    /// The EvDriver's schema declares every SI behavior parameter its
+    /// factory reads (`EvDriverParams::from_registry_config`, the set
+    /// docs/python.md publishes): a documented value arms the actor
+    /// instead of being refused as an unknown key. RED at the schema's
+    /// first cut, where the behavior set was absent.
+    #[test]
+    fn ev_driver_schema_covers_the_documented_si_parameters() {
+        let mut config = ActorConfig::new("driver", "EvDriver")
+            .with_param("target", ConfigValue::Text("EV1".into()))
+            .with_param("seed", ConfigValue::Float(42.0));
+        for (name, value) in [
+            ("event_day_ratio", 0.7),
+            ("daily_drive_distance_mean_m", 40_000.0),
+            ("fuel_economy_j_per_m", 671.08),
+            ("capacity_j", 288_000_000.0),
+            ("max_charge_w", 7_200.0),
+            ("average_speed_m_per_s", 13.4),
+            ("range_anxiety_distance_m", 32_000.0),
+            ("away_charge_fraction", 0.5),
+            ("away_charge_power_w", 6_600.0),
+        ] {
+            config = config.with_param(name, ConfigValue::Float(value));
+        }
+        let params = crate::actors::ev_driver::EvDriverParams::from_registry_config(&config)
+            .expect("the documented SI parameters build the driver's params");
+        assert_eq!(params.event_day_ratio, 0.7);
+        assert_eq!(params.capacity_j, 288_000_000.0);
+        assert_eq!(params.away_charge_power_w, 6_600.0);
+        ActorRegistry::new()
+            .create(config)
+            .expect("the documented SI parameters pass the schema");
     }
 
     /// A schema-complete config still arms the actor: the schemas are the
