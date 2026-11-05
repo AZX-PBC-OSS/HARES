@@ -3,9 +3,9 @@
 //! packaged unit's assembly composes (the recirculating fan's shared
 //! accounting rides its own row; this surface is the damper's).
 //!
-//! The damper has two operating positions — the minimum position (the
-//! ventilation's minimum: the outdoor-air floor the IAQ requirement sets)
-//! and full open (the design flow, the free-cooling position) — and two
+//! The damper has two operating positions: the minimum position (the
+//! ventilation's minimum, the outdoor-air floor the IAQ requirement sets)
+//! and full open (the design flow, the free-cooling position), and two
 //! lockouts that hold it at the minimum position with the mechanical
 //! cooling running, the forms EnergyPlus' economizer control applies
 //! (`MixedAir.cc` `Checksetpoints` and the `TempLowLim` gate):
@@ -77,7 +77,7 @@ impl EconomizerConfig {
     /// Validates the changeover and the damper's flows: every value finite,
     /// the changeover's setpoint finite, the damper's flows non-negative,
     /// the design flow positive. The minimum's flow above the design flow is
-    /// not an error — [`Self::resolved_flows`] clamps it to the design flow
+    /// not an error: [`Self::resolved_flows`] clamps it to the design flow
     /// (the damper's minimum position is then its full open) and the clamp
     /// is counted in the run's clamp census.
     pub fn validate(&self) -> crate::Result<()> {

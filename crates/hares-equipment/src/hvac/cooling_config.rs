@@ -11,6 +11,11 @@ use super::speed_control::SpeedControlMode;
 use crate::config::EquipmentTypedConfig;
 use crate::hvac::heating_config::HvacSetpointConfig;
 
+/// The compressor's minimum operating outdoor temperature when the config
+/// leaves the field blank: EnergyPlus `DXCoils.cc:731`,
+/// `minOATCompDXCooling = -25.0`.
+pub(crate) const DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C: f64 = -25.0;
+
 /// Typed configuration for central air conditioners.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +302,23 @@ impl CentralAirConditionerConfig {
         }
         if let Some(economizer) = &self.economizer {
             economizer.validate()?;
+            // The compressor's minimum-OAT lockout suppresses the whole
+            // unit below its floor, and the economizer's changeover opens
+            // the damper only below its own setpoint. A floor at or above
+            // the changeover leaves the free-cooling band empty: the
+            // declaration would be accepted and silently never fire, so it
+            // is a typed error naming both fields.
+            let min_oat_c = self
+                .min_oat_compressor_cooling_c
+                .unwrap_or(DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C);
+            if min_oat_c >= economizer.changeover_setpoint_c {
+                return Err(HaresError::Equipment(format!(
+                    "CentralAirConditionerConfig: the economizer's changeover_setpoint_c {} \
+                     must exceed the compressor's minimum-OAT lockout {} (the free-cooling \
+                     band is empty)",
+                    economizer.changeover_setpoint_c, min_oat_c
+                )));
+            }
         }
         Ok(())
     }

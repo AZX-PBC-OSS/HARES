@@ -6,7 +6,8 @@ use super::core_config::parse_biquadratic_list;
 use crate::EquipmentConfig;
 
 pub(super) use super::cooling_config::{
-    CentralAirConditionerConfig, DehumidifierConfig, RoomAcConfig,
+    CentralAirConditionerConfig, DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C, DehumidifierConfig,
+    RoomAcConfig,
 };
 pub(super) use super::heat_pump_config::{HeatPumpCoolerConfig, HeatPumpHeaterConfig};
 

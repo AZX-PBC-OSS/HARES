@@ -16,6 +16,7 @@ use arrow::array::{Array, Float64Array};
 use arrow::record_batch::RecordBatch;
 use hares_core::{Dwelling, DwellingConfig, DwellingSettings};
 use hares_input::{DefaultsSource, InputSource, SimulationConfig, WeatherInput};
+use hares_types::OperatingMode;
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -131,6 +132,9 @@ fn column(batches: &[RecordBatch], name: &str) -> Series {
 /// The step interval the fixture runs at.
 const STEP_S: f64 = 900.0;
 
+/// The fixture's simulation steps: the 1209600 s window at the 900 s step.
+const STEPS: usize = 1344;
+
 fn run_frames(economizer: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut dwelling = built_dwelling(economizer, true);
     let _catalogue = dwelling.catalogue();
@@ -142,10 +146,55 @@ fn run_frames(economizer: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     (zone, oat, cooling_kw)
 }
 
+/// One step's AC state as the unit publishes it: the thermostat's mode,
+/// the compressor's and fan's draws, the damper's position and flow, and
+/// the free-cooling credit. The frame's fixed column catalogue does not
+/// carry the economizer's own keys, so the run-level witnesses read the
+/// unit's telemetry through the environment the step publishes.
+struct EconomizerStep {
+    outdoor_c: f64,
+    zone_c: f64,
+    mode: f64,
+    compressor_kw: f64,
+    fan_kw: f64,
+    damper_position: f64,
+    oa_flow_m3_s: f64,
+    free_cooling_w: f64,
+}
+
+fn run_economizer_steps() -> Vec<EconomizerStep> {
+    let mut dwelling = built_dwelling(true, true);
+    let _catalogue = dwelling.catalogue();
+    let mut rows = Vec::with_capacity(STEPS);
+    for _ in 0..STEPS {
+        dwelling.step().expect("run completes");
+        let env = dwelling.latest_env();
+        let tel = env
+            .equipment_telemetry
+            .get("Air Conditioner")
+            .expect("the economizer run carries its Air Conditioner's telemetry");
+        let get = |key: &str| {
+            tel.get(key)
+                .unwrap_or_else(|| panic!("the Air Conditioner publishes '{key}'"))
+        };
+        rows.push(EconomizerStep {
+            outdoor_c: env.weather.outdoor_temp_c,
+            zone_c: env.zones[0].temperature_c,
+            mode: get("operating_mode"),
+            compressor_kw: get("compressor_kw"),
+            fan_kw: get("fan_kw"),
+            damper_position: get("economizer_oa_damper_position"),
+            oa_flow_m3_s: get("economizer_oa_flow_m3_s"),
+            free_cooling_w: get("economizer_free_cooling_w"),
+        });
+    }
+    rows
+}
+
 #[test]
 fn economizer_defers_the_cooling_call_below_the_changeover_and_zone_holds_setpoint() {
     let (_without_zone, without_oat, without_kw) = run_frames(false);
-    let (with_zone, _with_oat, with_kw) = run_frames(true);
+    let (_with_zone, _with_oat, with_kw) = run_frames(true);
 
     // The damper-free run's cooling-call steps below the changeover: the
     // steps whose compressor the economizer must defer. A cooling-call step
@@ -173,67 +222,85 @@ fn economizer_defers_the_cooling_call_below_the_changeover_and_zone_holds_setpoi
          cooling steps: the paired savings sum to {savings_kwh:.4} kWh"
     );
 
-    // The zone holds on the economizer's own cooling-call steps: a step
-    // where the run sits at or above the cooling call's edge with the
-    // compressor deferred must not run away. The thermostat's latched hold
-    // and the damper's free cooling together bound the zone near the call's
-    // edge (measured 23.1 C worst-case on this window); the assert pins
-    // that hold with margin rather than a runaway.
-    let mut with_call_steps = 0usize;
-    for i in 0..with_zone.len() {
-        if with_zone[i] > 20.9 && with_kw[i] == 0.0 && _with_oat[i] < 20.0 {
-            with_call_steps += 1;
+    // The economizer's own free-cooling steps: the damper at its full-open
+    // position, the fan running and the compressor deferred to zero while
+    // the outdoor air sits below the changeover. On those steps the zone
+    // must hold the 20 C call's band: a step that delivered nothing would
+    // let the zone fall through the bound, and a step whose credit failed
+    // to cover the call would run the compressor (the selection excludes
+    // it, so the count assertion below is what pins that case).
+    let rows = run_economizer_steps();
+    let mut free_cooling_steps = 0usize;
+    for (i, row) in rows.iter().enumerate() {
+        if row.outdoor_c < 20.0
+            && row.damper_position == 1.0
+            && row.compressor_kw == 0.0
+            && row.fan_kw > 0.0
+        {
+            free_cooling_steps += 1;
             assert!(
-                with_zone[i] <= 23.5,
-                "step {i}: the zone must hold setpoint while the economizer \\
-                 carries the load: zone {:.2} C at OAT {:.2} C",
-                with_zone[i],
-                _with_oat[i]
+                row.free_cooling_w > 0.0,
+                "step {i}: the deferred compressor step must carry the \
+                 damper's free-cooling credit, got {}",
+                row.free_cooling_w
+            );
+            assert!(
+                (19.0..=21.0).contains(&row.zone_c),
+                "step {i}: the zone must hold the 20 C call's band while the \
+                 economizer carries the load: zone {:.2} C at OAT {:.2} C",
+                row.zone_c,
+                row.outdoor_c
             );
         }
     }
     assert!(
-        with_call_steps >= 8,
-        "the economizer's run must hold the zone at the cooling call's edge \\
-         on below-changeover steps; found {with_call_steps}"
+        free_cooling_steps >= 8,
+        "the economizer's run must defer the compressor on below-changeover \
+         steps; found {free_cooling_steps}"
     );
 }
 
 #[test]
 fn economizer_damper_returns_to_minimum_above_the_changeover() {
-    let mut dwelling = built_dwelling(true, true);
-    let _catalogue = dwelling.catalogue();
-    let result = dwelling.simulate().expect("run completes");
-    let batches: Vec<RecordBatch> = result.reports[0].batches().to_vec();
-
-    let oat = column(&batches, "Outdoor Dry Bulb (C)");
-    let forced_vent = column(&batches, "Forced Ventilation Heat Gain - Indoor (W)");
-
-    // Above the changeover the damper rests at its minimum position: the
-    // damper's implied outdoor-air flow (the forced-vent column's magnitude
-    // over the density/heat-capacity/temperature-difference product) must
-    // sit at the minimum position's share of the design flow, never the
-    // full-open's.
-    let rho = 1.2_f64;
-    let cp = 1005.0_f64;
-    let minimum_flow_m3_s = 0.05_f64;
-    let design_flow_m3_s = 0.5_f64;
-    for i in 0..oat.values.len() {
-        if oat.values[i] > 22.0 && forced_vent.values[i] < 0.0 && forced_vent.values[i].is_finite()
-        {
-            let load_per_flow_w = rho * cp * (26.0 - oat.values[i]);
-            if load_per_flow_w > 1.0 {
-                let implied_flow_m3_s = forced_vent.values[i].abs() / load_per_flow_w;
+    let rows = run_economizer_steps();
+    // The damper's two positions: the minimum flow over the design flow
+    // (0.05 / 0.5) and the full open.
+    let minimum_position = 0.1;
+    let mut above_changeover = 0usize;
+    let mut below_cooling_open = 0usize;
+    for (i, row) in rows.iter().enumerate() {
+        if row.outdoor_c > 21.0 {
+            above_changeover += 1;
+            assert_eq!(
+                row.damper_position, minimum_position,
+                "step {i}: OAT {:.2} C is above the changeover, the damper \
+                 must rest at the minimum position",
+                row.outdoor_c
+            );
+        }
+        if row.outdoor_c < 19.0 && row.mode == OperatingMode::Cooling.as_code() {
+            below_cooling_open += 1;
+            assert_eq!(
+                row.damper_position, 1.0,
+                "step {i}: OAT {:.2} C is below the changeover with a cooling \
+                 call, the damper must open to its free-cooling position",
+                row.outdoor_c
+            );
+            if row.fan_kw > 0.0 {
                 assert!(
-                    implied_flow_m3_s < (minimum_flow_m3_s + design_flow_m3_s) * 0.5,
-                    "step {i}: OAT {:.2} C is above the changeover, the damper's \\
-                     implied flow {:.4} m3/s must be the minimum position's share",
-                    oat.values[i],
-                    implied_flow_m3_s
+                    row.oa_flow_m3_s > 0.0,
+                    "step {i}: the open damper must pass the design flow while \
+                     the fan runs, got {} m3/s",
+                    row.oa_flow_m3_s
                 );
             }
         }
     }
+    assert!(
+        above_changeover >= 8 && below_cooling_open >= 8,
+        "the window must exercise both sides of the changeover, found \
+         {above_changeover} above and {below_cooling_open} below"
+    );
 }
 
 #[test]

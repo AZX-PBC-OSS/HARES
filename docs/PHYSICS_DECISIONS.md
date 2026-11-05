@@ -2593,14 +2593,18 @@ control's own shape (`MixedAir.cc` `Checksetpoints` and the
 dry-bulb below the configured floor (the `TempLowLim` gate) each hold
 the damper at the minimum position with the mechanical cooling running.
 Either limit unconfigured is not operative, the same semantics the
-EnergyPlus IDD gives the blank fields. The enthalpy changeover form
-(comparing total enthalpies) is the alternative rejected: the design
-names the dry-bulb form.
+EnergyPlus IDD gives the blank fields. The compressor's minimum-OAT
+lockout suppresses the whole unit below its floor, so a changeover
+setpoint at or below that floor leaves no free-cooling band; the config
+validation rejects the empty band with a typed error naming both fields
+rather than accept a declaration that can never fire. The enthalpy
+changeover form (comparing total enthalpies) is the alternative
+rejected: the design names the dry-bulb form.
 
 The damper's free-cooling delivery is the unit's own zone-facing flow:
 the damper's outdoor-air sensible cooling (`ρ·V·cp·(T_zone − T_out)·PLR`
 at the outdoor-condition density) is credited against the DX stage load
-in the same step — one flow, one load, one value in the port's cooling
+in the same step: one flow, one load, one value in the port's cooling
 contribution, the reported `thermal_output_w` and the
 `economizer_free_cooling_w` telemetry. A cooling call pins the zone at
 or above (setpoint − hysteresis) while the changeover requires the
@@ -2608,9 +2612,14 @@ outdoor air below the changeover setpoint, so the driving difference
 dominates the fan's waste heat; a step where the fan's own waste heat
 exceeds the damper's OA cooling plus the deferred coil is floored at
 zero (counted in the clamp census) because the cooling category's sign
-convention cannot carry a heat gain. The damper's flow is fan-driven:
+convention cannot carry a heat gain. The credit is the lesser of the
+flow's outdoor-air cooling and the stage load: a damper that could
+deliver more than the call is credited at the call, so the zone's
+sensible trajectory does not over-cool past the no-economizer
+delivery. The damper's flow is fan-driven:
 the flow, its fan-power share and the credit all scale with the fan's
-on-fraction (the step's part-load ratio), so the thermostat's latched
+on-fraction (the step's part-load ratio), and with the controls' load
+fraction and an active power limit, so the thermostat's latched
 zero-duty steps move no outdoor air. The damper's minimum flow clamped
 to its design flow (a damper whose minimum passes more air than its
 full-open design) is a counted clamp, not a silent hold.
@@ -2619,7 +2628,7 @@ Alternatives rejected: crediting only the full-open position (leaves the
 minimum-position flow's cooling unnetted and flips the cooling
 category's sign on the latch's zero-duty steps); routing the OA load
 through the envelope's ventilation coupling (double-counts it against
-the unit's own port and trips the per-zone thermal consistency check —
+the unit's own port and trips the per-zone thermal consistency check;
 the damper is the unit's surface, not a parallel ventilation path); the
 mixed-air coil state (the coil entering the mixed temperature) for the
 same double-counting reason and because the OA's flow would then need

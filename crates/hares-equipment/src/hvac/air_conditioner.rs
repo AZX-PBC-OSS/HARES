@@ -42,7 +42,8 @@ use crate::HvacSetpointConfig;
 use crate::{Equipment, EquipmentConfig, EquipmentRegistry, load_versioned, try_save_versioned};
 
 use super::ac_config::{
-    CentralAirConditionerConfig, RoomAcConfig, default_telemetry, load_curve_pair, telemetry_fields,
+    CentralAirConditionerConfig, DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C, RoomAcConfig,
+    default_telemetry, load_curve_pair, telemetry_fields,
 };
 use super::coil_physics::{
     CoilOperatingState, CoilResult, LatentDegradationParams, calculate_shr,
@@ -146,11 +147,6 @@ pub(super) struct CoolingCore {
     /// The step's free-cooling credit [W]: the outdoor air's sensible
     /// cooling the damper delivered, credited against the DX stage load.
     economizer_free_cooling_w: f64,
-    /// The step's free-cooling decision: true when the cooling call found
-    /// the outdoor air cool enough that the damper opened to its
-    /// free-cooling position (the changeover's rule, the lockouts clear).
-    economizer_free_cooling_active: bool,
-
     // --- Ideal capacity (solver-driven) ---
     /// Cached from last update_control; true when timestep >= 5 min.
     use_ideal: bool,
@@ -770,7 +766,6 @@ impl CoolingCore {
             damper_position_fraction: 0.0,
             economizer_oa_flow_m3_s: 0.0,
             economizer_free_cooling_w: 0.0,
-            economizer_free_cooling_active: false,
             use_ideal: false,
             ideal_capacity_w: 0.0,
             ideal_capacity_signal_arrived: false,
@@ -1041,7 +1036,7 @@ impl CoolingCore {
             // setpoint, and the lockouts. The damper's outdoor-air flow is
             // the unit's own delivery surface, so a unit whose served zone
             // is not the dwelling's indoor zone would land the damper's
-            // load on the wrong zone — a declaration error, not a silent
+            // load on the wrong zone: a declaration error, not a silent
             // mis-landed load.
             self.economizer = match &cfg.economizer {
                 Some(economizer) => {
@@ -1114,10 +1109,12 @@ impl CoolingCore {
         // EnergyPlus `DXCoils.cc:731`: `minOATCompDXCooling = -25.0`.
         self.min_oat_cooling_c = if self.is_room_ac {
             let cfg = config.require_typed::<RoomAcConfig>("Room AC")?;
-            cfg.min_oat_compressor_cooling_c.unwrap_or(-25.0)
+            cfg.min_oat_compressor_cooling_c
+                .unwrap_or(DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C)
         } else {
             let cfg = config.require_typed::<CentralAirConditionerConfig>("Air Conditioner")?;
-            cfg.min_oat_compressor_cooling_c.unwrap_or(-25.0)
+            cfg.min_oat_compressor_cooling_c
+                .unwrap_or(DEFAULT_MIN_OAT_COMPRESSOR_COOLING_C)
         };
 
         self.operating_mode = OperatingMode::Off;
@@ -1213,8 +1210,8 @@ impl CoolingCore {
         // unknown key latches a typed error surfaced at the end of the
         // step), the descriptor's declared telemetry fields carry them so
         // the descriptor contract (telemetry key count == declared field
-        // count) holds, and an unconfigured unit's key set — and its
-        // frames — stay exactly a damper-free unit's. Placed after the
+        // count) holds, and an unconfigured unit's key set, and its
+        // frames, stay exactly a damper-free unit's. Placed after the
         // observe-gated diagnostics block above, whose telemetry-fields
         // rebuild would otherwise wipe the declaration.
         if self.economizer.is_some() {
@@ -1274,7 +1271,6 @@ impl CoolingCore {
             .economizer
             .as_ref()
             .map_or(0.0, |econ| econ.minimum_position_fraction);
-        self.economizer_free_cooling_active = false;
         self.economizer_oa_flow_m3_s = 0.0;
         self.economizer_free_cooling_w = 0.0;
 
@@ -1429,7 +1425,6 @@ impl CoolingCore {
             let free_cooling = self.operating_mode == OperatingMode::Cooling
                 && !lockout
                 && outdoor_temp_c < econ.changeover_setpoint_c;
-            self.economizer_free_cooling_active = free_cooling;
             self.damper_position_fraction = if free_cooling {
                 1.0
             } else {
@@ -1489,19 +1484,19 @@ impl CoolingCore {
             // damper position's fraction of the design flow at the fan's
             // duty (the IAQ floor at the minimum, the design flow at the
             // free-cooling position), and the damper's share of the fan's
-            // energy moves that flow — the damper's fan-power penalty,
+            // energy moves that flow: the damper's fan-power penalty,
             // metered on the same fan-power constant the coil's supply
             // flow uses. The perf's credit is that flow's sensible
             // cooling, already deducted from the DX stage load; the port
             // contribution below nets the same value, so the unit's
             // zone-facing flow and its reported service are one net, two
             // faces.
+            let mut oa_flow_at_fan_duty_m3_s = 0.0;
             if let Some(econ) = &self.economizer {
                 let fan_duty = self.hvac.runtime.duty_cycle.clamp(0.0, 1.0);
-                let oa_flow_m3_s =
+                oa_flow_at_fan_duty_m3_s =
                     self.damper_position_fraction * econ.damper.design_oa_flow_m3_s * fan_duty;
-                self.economizer_oa_flow_m3_s = oa_flow_m3_s;
-                fan_w += self.hvac.fan_power_w(oa_flow_m3_s);
+                fan_w += self.hvac.fan_power_w(oa_flow_at_fan_duty_m3_s);
             }
 
             // Apply compound load multipliers (duty cycle * transient load * DR).
@@ -1537,13 +1532,24 @@ impl CoolingCore {
             // delivery takes. The port's cooling contribution nets it
             // beside the coil's share; the net's floor at zero (counted in
             // the clamp census) covers the step where the fan's own waste
-            // heat exceeds the damper's OA cooling plus the deferred coil —
+            // heat exceeds the damper's OA cooling plus the deferred coil,
             // a heat gain the cooling category's sign convention cannot
             // carry, so the excess rides the fan's heat term instead of
             // flipping the category's sign.
             let economizer_credit_applied_w =
                 perf.economizer_credit_w * thermal_ratio * effective_load;
             self.economizer_free_cooling_w = economizer_credit_applied_w;
+            // The controls' load fraction and an active power limit both
+            // scale the coil's delivered capacity and the fan's average
+            // power; the outdoor-air flow the fan passes scales with them
+            // too. The published flow is therefore the same flow the
+            // credit is metered against, so a consumer reading the flow
+            // and the outdoor condition recovers the credit. Guarded so a
+            // unit without an economizer keeps its damper-free step.
+            if self.economizer.is_some() {
+                self.economizer_oa_flow_m3_s =
+                    oa_flow_at_fan_duty_m3_s * effective_load * thermal_ratio;
+            }
             let fan_heat_w = fan_w;
             let net_cooling_w = -sensible_cooling_w - economizer_credit_applied_w + fan_heat_w;
             if net_cooling_w > 0.0 {
@@ -1721,7 +1727,7 @@ impl CoolingCore {
         let post_dse_latent_w = latent_cooling_w * dse;
         // The unit's reported service is its own net: the economizer's
         // free-cooling delivery nets beside the coil's share, and the fan's
-        // waste heat nets against them — the whole net floored at zero,
+        // waste heat nets against them, the whole net floored at zero,
         // matching the port contribution's floor (a step where the fan's
         // waste heat exceeds the damper's OA cooling plus the deferred coil
         // is a heat gain the cooling mode's sign rule cannot report; the
@@ -2201,14 +2207,14 @@ impl CoolingCore {
         let total_capacity_w = (staged_capacity_w * plr).max(0.0).min(capacity_ceiling);
 
         // The economizer's free-cooling credit: the damper's outdoor air's
-        // sensible cooling at the step's own damper position — the minimum
-        // position's IAQ flow included — defers the DX stage load by itself
+        // sensible cooling at the step's own damper position, the minimum
+        // position's IAQ flow included, defers the DX stage load by itself
         // (one flow, one load: the same value the port's cooling
         // contribution nets and the telemetry reports). The credit uses the
         // outdoor-condition density. A cooling call pins the zone at or
         // above (setpoint − hysteresis) while the damper's changeover
         // requires the outdoor air below the changeover setpoint, so the
-        // driving difference — and with it the credit — dominates the
+        // driving difference, and with it the credit, dominates the
         // fan's waste heat on every cooling step; when the credit covers
         // the whole stage load the compressor's draw falls to zero while
         // the fan keeps running. The damper's flow is fan-driven: the
@@ -7196,7 +7202,7 @@ mod tests {
     fn economizer_free_cooling_credit_equals_the_dx_stage_load_reduction() {
         // The same unit with and without the economizer, the same env: the
         // coil's gross total with the credit plus the applied credit equals
-        // the coil's gross total without it — the credit IS the stage
+        // the coil's gross total without it: the credit IS the stage
         // load's reduction (the mixed-air energy balance's closure against
         // the damper's outdoor-air load).
         let with_cfg = economizer_ac_config(|_| {});
@@ -7246,6 +7252,117 @@ mod tests {
     }
 
     #[test]
+    fn economizer_net_cooling_floor_is_counted() {
+        // A damper whose minimum flow is its design flow and an outdoor air
+        // warmer than the zone: the damper carries no free-cooling credit,
+        // and its fan-power share exceeds the coil's sensible delivery, so
+        // the net cooling is a heat gain the cooling category's sign rule
+        // cannot carry. The floor at zero is a counted census event.
+        let cfg = economizer_ac_config(|econ| {
+            econ.damper.minimum_oa_flow_m3_s = 50.0;
+            econ.damper.design_oa_flow_m3_s = 50.0;
+        });
+        #[cfg(feature = "observe")]
+        let _ = hares_types::clamp_census::take();
+        let mut eq = AirConditioner::new(cfg.clone());
+        let hot = env_with_oa(26.0, 30.0, 0.005);
+        eq.init(&cfg, &hot).unwrap();
+        assert_eq!(eq.update_control(&hot), OperatingMode::Cooling);
+        let mut ports = cooling_ports();
+        eq.step(&hot, Duration::from_secs(60), &mut ports).unwrap();
+        #[cfg(feature = "observe")]
+        {
+            let census = hares_types::clamp_census::take();
+            assert_eq!(
+                census.count(hares_types::clamp_census::ClampSite::EconomizerNetCoolingFloor),
+                1,
+                "the net cooling's zero floor is counted at the step that applies it"
+            );
+            assert_eq!(
+                census.total(),
+                1,
+                "no other clamp fires in this probe, so the census names the net floor alone"
+            );
+        }
+    }
+
+    #[test]
+    fn economizer_oa_flow_scales_with_the_control_load_fraction() {
+        // The air flow the fan passes is an average over the step: the
+        // controls' load fraction scales the coil's delivered capacity and
+        // the fan's average power, so it scales the outdoor-air flow too.
+        // The free-cooling credit is metered against that same flow, so the
+        // published flow and the credit must stay one flow, one load.
+        // The damper's design flow is narrowed so the outdoor air's cooling
+        // stays under the coil's capacity: the credit's own cap must not
+        // mask the flow it is metered against.
+        let design_flow_m3_s = 0.2;
+        let cfg = economizer_ac_config(|econ| {
+            econ.damper.design_oa_flow_m3_s = design_flow_m3_s;
+        });
+        let cool = env_with_oa(26.0, 9.0, 0.005);
+        let mut eq = AirConditioner::new(cfg.clone());
+        eq.init(&cfg, &cool).unwrap();
+        eq.apply_signal(&ControlSignal::LoadFraction { fraction: 0.5 })
+            .expect("the load-fraction signal is in contract");
+        assert_eq!(eq.update_control(&cool), OperatingMode::Cooling);
+        let mut ports = cooling_ports();
+        eq.step(&cool, Duration::from_secs(60), &mut ports).unwrap();
+        let position = eq
+            .telemetry()
+            .get(tk::ECONOMIZER_OA_DAMPER_POSITION)
+            .expect("the damper position is published");
+        let duty = eq
+            .telemetry()
+            .get(tk::DUTY_CYCLE)
+            .expect("the duty cycle is published");
+        let flow = eq
+            .telemetry()
+            .get(tk::ECONOMIZER_OA_FLOW_M3_S)
+            .expect("the damper flow is published");
+        assert_eq!(position, 1.0);
+        // The fan's own on-fraction is the thermostat's duty cycle; the
+        // controls' half load fraction scales the average flow on top of it.
+        let expected_flow = position * design_flow_m3_s * duty * 0.5;
+        assert!(
+            (flow - expected_flow).abs() < 1e-12,
+            "the published flow must carry the load fraction: {flow} vs {expected_flow}"
+        );
+        let credit = eq
+            .telemetry()
+            .get(tk::ECONOMIZER_FREE_COOLING_W)
+            .expect("the free-cooling credit is published");
+        let rho = hares_physics::air_properties::moist_air_density_kg_m3(101_325.0, 9.0, 0.005);
+        let expected_credit =
+            rho * flow * hares_physics::constants::CP_DRY_AIR_J_KG_K * (26.0 - 9.0);
+        assert!(
+            (credit - expected_credit).abs() <= expected_credit.abs() * 1e-12,
+            "the credit must be the published flow's outdoor-air cooling: \
+             {credit} vs {expected_credit}"
+        );
+    }
+
+    #[test]
+    fn economizer_changeover_at_the_compressor_lockout_is_a_typed_error() {
+        // The compressor's OAT lockout suppresses the whole unit below its
+        // floor, and the changeover opens the damper only below its own
+        // setpoint. A floor at or above the changeover leaves no
+        // free-cooling band: the declaration would be accepted and never
+        // fire, so the config validation names both fields.
+        let mut typed = ac_config().typed::<CentralAirConditionerConfig>().unwrap();
+        typed.min_oat_compressor_cooling_c = Some(10.0);
+        typed.economizer = Some(economizer_config());
+        let err = typed
+            .validate()
+            .expect_err("an empty free-cooling band is rejected");
+        let text = err.to_string();
+        assert!(
+            text.contains("changeover_setpoint_c") && text.contains("minimum-OAT"),
+            "the error names the changeover and the lockout: {text}"
+        );
+    }
+
+    #[test]
     fn unconfigured_ac_carries_no_economizer_surface() {
         // The off default: no economizer keys, no damper state, the step's
         // draw the damper-free unit's own.
@@ -7283,6 +7400,10 @@ mod tests {
         let cfg = economizer_ac_config(|econ| {
             econ.damper.minimum_oa_flow_m3_s = 0.8;
         });
+        // The init records the clamp on this thread's per-step tally; drain
+        // whatever an earlier test left so the probe asserts its own firing.
+        #[cfg(feature = "observe")]
+        let _ = hares_types::clamp_census::take();
         let mut eq = AirConditioner::new(cfg.clone());
         let hot = env(26.0, 0.01, 19.0, 30.0);
         eq.init(&cfg, &hot).unwrap();
@@ -7295,6 +7416,20 @@ mod tests {
             Some(1.0),
             "the clamped minimum position IS the full open"
         );
+        #[cfg(feature = "observe")]
+        {
+            let census = hares_types::clamp_census::take();
+            assert_eq!(
+                census.count(hares_types::clamp_census::ClampSite::EconomizerDamperLimit),
+                1,
+                "the minimum-above-design clamp is counted once at the init that applies it"
+            );
+            assert_eq!(
+                census.total(),
+                1,
+                "no other clamp fires in this probe, so the census names the damper limit alone"
+            );
+        }
     }
 }
 
