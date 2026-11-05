@@ -140,9 +140,7 @@ pub(super) fn telemetry_fields() -> Vec<TelemetryField> {
         TelemetryField::code_code(
             tk::DER1547_TRIP_REASON,
             crate::der1547::trip_reason::LABELS.as_slice(),
-            "The IEEE 1547 trip condition that fired: 0.0 = none, 1.0 = uv2, \
-                 2.0 = uv1, 3.0 = ov1, 4.0 = ov2, 5.0 = uf2, 6.0 = uf1, \
-                 7.0 = of1, 8.0 = of2",
+            crate::der1547::trip_reason::DESCRIPTION,
         ),
         TelemetryField::flow_mean(
             tk::DER1547_RIDE_THROUGH_S,

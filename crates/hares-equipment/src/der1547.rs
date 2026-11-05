@@ -80,6 +80,14 @@ pub mod trip_reason {
         "of2",
         "input_invalid",
     ];
+
+    /// The published description of `der1547_trip_reason`: the PV, the
+    /// battery and the EV declare the channel with this one text, so the
+    /// code vocabulary's description cannot drift from [`LABELS`].
+    pub const DESCRIPTION: &str = "The IEEE 1547 trip condition that fired: 0.0 = none, 1.0 = uv2, \
+         2.0 = uv1, 3.0 = ov1, 4.0 = ov2, 5.0 = uf2, 6.0 = uf1, \
+         7.0 = of1, 8.0 = of2, 9.0 = input_invalid (the bus voltage or \
+         frequency was non-finite; the trip latches like the standard ones)";
 }
 
 /// The standard's abnormal-performance category a DER's default settings
@@ -1968,6 +1976,21 @@ mod tests {
             reconnected |= !out.tripped;
         }
         assert!(reconnected, "the enter-service procedure completes");
+    }
+
+    /// The published description names every code the vocabulary
+    /// publishes, in code order. The red state at the parent stopped at
+    /// 8.0 = of2 while `LABELS` had grown to ten: the one text the three
+    /// equipment writers declare the channel with did not disclose the
+    /// fail-safe's code.
+    #[test]
+    fn the_published_description_names_every_trip_code() {
+        for (code, label) in trip_reason::LABELS.iter().enumerate() {
+            assert!(
+                trip_reason::DESCRIPTION.contains(&format!("{code}.0 = {label}")),
+                "the description names code {code} ({label})"
+            );
+        }
     }
 
     // -- The state's checkpoint round trip. --
