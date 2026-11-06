@@ -195,11 +195,12 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
 //
 // Root-cause fixes applied (T-0301): free-float initialization uses outdoor
 // temperature (not 21°C default) when HVAC setpoints are absent; internal gains
-// use 30% radiant fraction per EnergyPlus BESTEST IDF specification.
+// use the standard's radiant fraction (ASHRAE 140-2017 Addendum a Section
+// 5.2.1.7: the 200 W gains are 60% radiative, 40% convective).
 // T-0352 corrected a TOML parse bug: internal_gains_radiant_fraction was silently
 // dropped because the keys appeared after a [section] header and were absorbed
 // into that section's table. The radiant fraction is now correctly parsed and
-// applied — 200 W × 0.3 = 60 W radiant to surfaces, 140 W convective to zone air.
+// applied: 200 W × 0.6 = 120 W radiant to surfaces, 80 W convective to zone air.
 // IGNORED at the 140-2017 pins: annual_heating=3205 vs band [4296,5709]
 // kWh (below) and annual_cooling=5892 vs band [6137,7964] kWh (below).
 // Additional physics fixes
@@ -278,11 +279,12 @@ fn bestest_case_600ff() {
 // temperature [0.6, 2.2]°C (ASHRAE 140-2023 Annex B8 Table B8-5). ASHRAE 140
 // bands are published oracles and must NOT be widened.
 // Root-cause fixes applied (T-0301): free-float init now uses outdoor temp
-// and internal gains use 30% radiant fraction.  T-0352 corrected a TOML parse
-// bug that silently dropped the radiant fraction before T-0301's fix could take
-// effect.  However, the 21-day warmup already washes out initial-condition
-// effects, and the radiant fraction alone is insufficient to restore
-// min_zone_temp into the ASHRAE band.
+// and internal gains use the standard's radiant fraction (ASHRAE 140-2017
+// Addendum a Section 5.2.1.7: 60% radiative, 40% convective).  T-0352
+// corrected a TOML parse bug that silently dropped the radiant fraction
+// before T-0301's fix could take effect.  However, the 21-day warmup already
+// washes out initial-condition effects, and the radiant fraction alone is
+// insufficient to restore min_zone_temp into the ASHRAE band.
 // IGNORED at the 140-2017 pins: peak_zone_temp=46.2 vs band
 // [41.6,44.8]°C (above) and min_zone_temp=3.37 vs band [-6.4,-1.6]°C
 // (above). Additional physics fixes

@@ -11,9 +11,11 @@
 //!      free-float building with no HVAC — concrete walls start unrealistically
 //!      warm. Measured impact: −4.53 °C (21 °C→0 °C proxy); warmup-appropriate
 //!      initialization (≈3 °C) accounts for ~2.4 °C of the 2.50 °C outlier.
-//!   2. Internal gains 100 % convective; EnergyPlus BESTEST IDF specifies
-//!      Fraction Radiant = 0.3 (30% of total gain is radiant).
-//!      Measured impact: −0.295 °C.
+//!   2. Internal gains 100 % convective, corrected to a radiant split; the
+//!      fixtures then carried the 0.3 radiant value (the I/O Reference's
+//!      generic OtherEquipment example; the standard's case input is 0.6,
+//!      docs/PHYSICS_DECISIONS.md). Measured impact of the 0.3 split:
+//!      −0.295 °C.
 //!      Note (T-0352): the radiant fraction was silently dropped by a TOML
 //!      parse bug in the BESTEST fixtures — the keys appeared after a [section]
 //!      header and were absorbed into that section's table, so
@@ -389,10 +391,12 @@ fn free_float_initialization_corrects_concrete_overshoot() {
 /// convective/radiant split on zone heat balance.
 ///
 /// Before the fix, internal gains were 100 % convective — all 200 W injected
-/// directly into zone air.  EnergyPlus BESTEST IDF specifies Fraction Radiant
-/// = 0.3: 60 W radiant distributed to interior surfaces via TMULT weighting,
-/// 140 W convective directly to zone air.  The measured impact on 900FF
-/// minimum zone temperature is −0.295 °C.
+/// directly into zone air.  The fixtures then carried the 0.3 radiant value
+/// (the I/O Reference's generic OtherEquipment example; the standard's case
+/// input is 0.6, docs/PHYSICS_DECISIONS.md): 60 W radiant distributed to
+/// interior surfaces via TMULT weighting, 140 W convective directly to zone
+/// air.  The measured impact of that split on 900FF minimum zone temperature
+/// is −0.295 °C.
 ///
 /// At winter minimum (cold night, T_zone ≈ −1.6 °C per ASHRAE 140 upper
 /// bound), interior surfaces are warmer than zone air.  Radiant gains to
@@ -409,7 +413,9 @@ fn internal_gains_radiant_fraction_reduces_convective_heat_to_zone_air() {
     let radiant_w: f64 = total_gain_w * radiant_frac;
     let convective_w: f64 = total_gain_w * (1.0 - radiant_frac);
 
-    // The 30 % radiant split is per EnergyPlus BESTEST IDF specification.
+    // The 30 % radiant split was the fixtures' value when the impact was
+    // measured; the case input is the standard's 0.6
+    // (docs/PHYSICS_DECISIONS.md).
     assert!(
         (radiant_w - 60.0).abs() < 1e-9,
         "30 % of 200 W = 60 W radiant, got {radiant_w}"
@@ -434,8 +440,9 @@ fn internal_gains_radiant_fraction_reduces_convective_heat_to_zone_air() {
     // Compute UA from 900FF boundary conductances to verify the back-of-envelope.
     let wall_conductance_series: f64 =
         4.0 * 63.6 /* m² */ / (0.009 / 0.140 + 0.0615 / 0.040 + 0.100 / 0.510);
-    // The exact UA values aren't critical here — the 0.3 split math is the
-    // physics fact.  This test documents that the 70/30 split is the correct
-    // EnergyPlus specification, not a tunable parameter.
+    // The exact UA values aren't critical here: the split math is the
+    // physics fact.  The split is the standard's case input (the fixtures'
+    // 0.3 when this impact was measured, the standard's 0.6 since), not a
+    // tunable parameter.
     let _ = wall_conductance_series;
 }
