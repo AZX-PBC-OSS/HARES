@@ -203,6 +203,48 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     })
 }
 
+/// The validation contracts the harness offers. Selection is explicit:
+/// a contract names its own comparison surface and never substitutes
+/// for another. The B8 example bands are the regression harness's mode
+/// (the drift-locked comparison above); the A3 acceptance criteria are
+/// their own mode beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationContract {
+    /// ANSI/ASHRAE 140-2023 Informative Annex B8 example-result bands:
+    /// the regression harness's comparison, drift-locked at measured
+    /// baselines, never a conformance claim.
+    AnnexB8ExampleBands,
+    /// ANSI/ASHRAE 140-2023 Normative Annex A3 software acceptance
+    /// criteria: the single-value ranges, the February 1 and July 14
+    /// hourly load comparisons, and the minimum-case rule.
+    AnnexA3Acceptance,
+}
+
+/// The contracts this harness registers. A contract appears here only
+/// when its comparison surface is implemented and pinned to a public
+/// source.
+pub fn selected_contracts() -> Vec<ValidationContract> {
+    vec![ValidationContract::AnnexB8ExampleBands]
+}
+
+// The A3 acceptance contract must be selectable beside the B8 example
+// bands: Normative Annex A3 is the standard's own software acceptance
+// surface (single-value ranges, the two dates' hourly comparisons, the
+// minimum-case rule), and its absence leaves the informative example
+// bands as the only comparison, which the standard itself does not
+// treat as conformance.
+#[test]
+fn annex_a3_acceptance_contract_is_selected() {
+    let selected = selected_contracts();
+    assert!(
+        selected.contains(&ValidationContract::AnnexA3Acceptance),
+        "the A3 acceptance contract is not selected: selected_contracts() = \
+         {selected:?}; the normative A3 surface (the single-value ranges, the \
+         February 1 and July 14 hourly comparisons, the minimum-case rule) \
+         must be an explicitly selectable mode beside the B8 example bands"
+    );
+}
+
 // BESTEST Case 600: lightweight conditioned building, annual loads.
 // Wood-frame walls (no significant thermal mass), insulated floor over
 // crawlspace, double-pane south-facing glazing. Low thermal capacitance means
