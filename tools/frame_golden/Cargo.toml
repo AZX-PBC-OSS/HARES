@@ -10,8 +10,10 @@ dst = ["hares-core/dst"]
 observe = ["hares-core/observe"]
 # The tool's allocator install reads the leaf's counting allocator,
 # which lives in the leaf's profiling-gated module, so this gate
-# carries the leaf's beside the core's.
-profiling = ["hares-core/profiling", "hares-types/profiling"]
+# carries the leaf's beside the core's. It also carries the fleet's,
+# whose hook-install invariant assertions read the leaf's panic-hook
+# machinery.
+profiling = ["hares-core/profiling", "hares-types/profiling", "hares-fleet/profiling"]
 
 [dependencies]
 hares-core = { workspace = true }

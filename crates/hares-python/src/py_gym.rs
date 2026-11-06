@@ -838,6 +838,7 @@ pub fn batch_step_py(
     // touching Python. Both methods use only Mutex<Dwelling> internally.
     let _guard = PanicHookGuard::new();
     #[cfg(debug_assertions)]
+    #[cfg(feature = "profiling")]
     {
         assert!(
             panic_hook::is_installed(),

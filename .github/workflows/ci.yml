@@ -226,6 +226,26 @@ jobs:
           name: nextest-results-${{ matrix.features }}
           path: target/nextest/ci/junit-*.xml
 
+  panic-hook-gate:
+    name: "panic hook gate (feature matrix)"
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_DIR: target/panic-hook-gate
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # The probe is its own workspace, so the main workspace's cargo
+      # commands do not cover it: format and lint it here, then run both
+      # feature arms. The absence arm is the regression witness (it fails
+      # if the leaf's guard installs without the profiling feature).
+      - run: cargo fmt --check --manifest-path tools/panic_hook_gate/Cargo.toml
+      - run: cargo clippy --manifest-path tools/panic_hook_gate/Cargo.toml -- -D warnings
+      - run: cargo clippy --manifest-path tools/panic_hook_gate/Cargo.toml --features profiling -- -D warnings
+      - name: "Without the feature: the hook's machinery is absent"
+        run: cargo run --manifest-path tools/panic_hook_gate/Cargo.toml
+      - name: "With the feature: the hook's machinery is present"
+        run: cargo run --manifest-path tools/panic_hook_gate/Cargo.toml --features profiling
+
   golden:
     name: "frame_golden compare-all"
     runs-on: ubuntu-24.04

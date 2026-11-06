@@ -1099,6 +1099,7 @@ dependencies = [
  "chrono",
  "hares-control",
  "hares-core",
+ "hares-fleet",
  "hares-input",
  "hares-output",
  "hares-types",

@@ -18,23 +18,50 @@
 //!     // guard restores the previous hook on Drop
 //! }
 //! ```
+//!
+//! ## The profiling gate
+//!
+//! The hook's install machinery (the guard's installation, the custom hook, the
+//! refcount state, the install accessor, the observe counters, and the capture's
+//! data structures) compiles only under the profiling feature, the same gate
+//! that keeps the leaf's `alloc_count` out of no-feature builds: a production
+//! build carries none of it and [`PanicHookGuard`] is an inert shell that
+//! installs nothing. The error-path survivors ([`panic_payload_to_string`] and
+//! [`record_double_panic_prevented`]) stay available to every dependent in both
+//! configurations, because the production error paths (the engine's
+//! `catch_unwind`, the fleet runner's per-dwelling panic isolation, the output
+//! callback's error capture, the Python bindings' fault conversion) consume them
+//! ungated: without the hook they fall back to the raw payload string.
 
+// The install machinery and its data structures compile only under the
+// profiling feature; the imports here are its private set. The error-path
+// survivors need none of them (`Ordering` also serves the observe-gated
+// double-panic counter, which survives in both configurations of the
+// profiling gate).
+#[cfg(feature = "profiling")]
 use std::cell::RefCell;
+#[cfg(feature = "profiling")]
 use std::panic::{self, PanicHookInfo};
+#[cfg(feature = "profiling")]
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(feature = "profiling")]
+use std::sync::atomic::AtomicBool;
+#[cfg(any(feature = "profiling", feature = "observe"))]
+use std::sync::atomic::Ordering;
 
 #[cfg(feature = "observe")]
 use std::sync::atomic::AtomicU64;
 
 /// Type alias for the boxed panic hook function, factoring out the complex
 /// `Fn(&PanicHookInfo<'_>) + Send + Sync + 'static` bound.
+#[cfg(feature = "profiling")]
 type PanicHookFn = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
 // ---------------------------------------------------------------------------
 // thread-local panic info storage
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "profiling")]
 thread_local! {
     /// Per-thread storage for the most recent panic's metadata.
     /// Populated by the custom hook before the panic unwinds;
@@ -46,6 +73,7 @@ thread_local! {
 ///
 /// `PanicHookInfo` itself is not `Send`, so we copy out the fields we need
 /// into this owned struct. All fields are `Send + Sync`.
+#[cfg(feature = "profiling")]
 #[derive(Debug, Clone)]
 pub struct PanicInfoCapture {
     /// String-form payload (the panic message).
@@ -64,32 +92,42 @@ pub struct PanicInfoCapture {
 
 /// Set to `true` when our custom hook is the current process-wide hook.
 /// Reflects [`HookState::count`] > 0.
+#[cfg(feature = "profiling")]
 static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Counter of panics caught via `catch_unwind` in the current process.
-#[cfg(feature = "observe")]
+///
+/// The count comes from the hook's capture, so the counter compiles with
+/// the profiling machinery: an observe-only build has no hook to count
+/// through, and a zero there would read as a measured zero.
+#[cfg(all(feature = "observe", feature = "profiling"))]
 static PANIC_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Counter of panics where file/line metadata was successfully captured.
-#[cfg(feature = "observe")]
+#[cfg(all(feature = "observe", feature = "profiling"))]
 static PANIC_WITH_LOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Returns `true` when the HARES custom panic hook is believed to be installed.
 ///
+/// The accessor is part of the install machinery: without the profiling
+/// feature the hook cannot be installed, so the symbol is compiled out with
+/// the machinery and every caller sits in profiling-gated code.
+///
 /// Used by `cfg(debug_assertions)` assertions.
+#[cfg(feature = "profiling")]
 #[inline]
 pub fn is_installed() -> bool {
     HOOK_INSTALLED.load(Ordering::Acquire)
 }
 
 /// Returns the total number of panics caught in this process.
-#[cfg(feature = "observe")]
+#[cfg(all(feature = "observe", feature = "profiling"))]
 pub fn panic_counter() -> u64 {
     PANIC_COUNT.load(Ordering::Relaxed)
 }
 
 /// Returns the number of panics where file/line metadata was captured.
-#[cfg(feature = "observe")]
+#[cfg(all(feature = "observe", feature = "profiling"))]
 pub fn panic_with_location_counter() -> u64 {
     PANIC_WITH_LOCATION_COUNT.load(Ordering::Relaxed)
 }
@@ -117,6 +155,7 @@ pub fn record_double_panic_prevented() {
 // ---------------------------------------------------------------------------
 
 /// State guarded by its own [`Mutex`] during install/uninstall transitions.
+#[cfg(feature = "profiling")]
 struct HookState {
     /// Number of active [`PanicHookGuard`] instances across all threads.
     count: usize,
@@ -125,6 +164,7 @@ struct HookState {
     saved_hook: Option<PanicHookFn>,
 }
 
+#[cfg(feature = "profiling")]
 static HOOK_STATE: Mutex<HookState> = Mutex::new(HookState {
     count: 0,
     saved_hook: None,
@@ -132,6 +172,7 @@ static HOOK_STATE: Mutex<HookState> = Mutex::new(HookState {
 
 /// Increments the refcount. On the first activation, saves the current
 /// process-wide hook and installs our custom hook.
+#[cfg(feature = "profiling")]
 fn install() {
     let mut state = HOOK_STATE.lock().unwrap_or_else(|e| e.into_inner());
     if state.count == 0 {
@@ -145,6 +186,7 @@ fn install() {
 
 /// Decrements the refcount. On the last deactivation, removes our hook and
 /// restores the original hook saved during the first [`install`].
+#[cfg(feature = "profiling")]
 fn uninstall() {
     let mut state = HOOK_STATE.lock().unwrap_or_else(|e| e.into_inner());
     state.count -= 1;
@@ -163,6 +205,7 @@ fn uninstall() {
 ///
 /// Suppresses stderr output (no backtrace, no default hook invocation) and
 /// stores the panic metadata in the per-thread [`PANIC_INFO`] cell.
+#[cfg(feature = "profiling")]
 fn custom_hook(info: &PanicHookInfo<'_>) {
     let payload_str = if let Some(s) = info.payload().downcast_ref::<&str>() {
         (*s).to_string()
@@ -195,6 +238,10 @@ fn custom_hook(info: &PanicHookInfo<'_>) {
 /// is created and restored when the last guard is dropped, regardless of
 /// which thread owns the guard.
 ///
+/// The hook's install machinery is compiled only under the profiling
+/// feature: without it the guard is an inert shell; [`PanicHookGuard::new`]
+/// installs nothing and the [`Drop`] restore does nothing.
+///
 /// ```ignore
 /// let _guard = PanicHookGuard::new();
 /// // panics here are silent and captured
@@ -207,7 +254,11 @@ impl PanicHookGuard {
     /// Installs the HARES custom hook (or bumps the refcount if already
     /// installed) and returns a guard that restores the original hook on
     /// [`Drop`].
+    ///
+    /// Without the profiling feature this installs nothing and the guard
+    /// is inert.
     pub fn new() -> Self {
+        #[cfg(feature = "profiling")]
         install();
         Self
     }
@@ -221,6 +272,7 @@ impl Default for PanicHookGuard {
 
 impl Drop for PanicHookGuard {
     fn drop(&mut self) {
+        #[cfg(feature = "profiling")]
         uninstall();
     }
 }
@@ -231,6 +283,7 @@ impl Drop for PanicHookGuard {
 /// Returns `None` when the custom hook is not currently installed, because
 /// any thread-local data would be stale (left over from a prior hook
 /// installation or a panic on a different test that shared this thread).
+#[cfg(feature = "profiling")]
 pub fn take_panic_info() -> Option<PanicInfoCapture> {
     if !is_installed() {
         return None;
@@ -241,6 +294,10 @@ pub fn take_panic_info() -> Option<PanicInfoCapture> {
 /// Converts a panic payload (from [`panic::catch_unwind`]) to a string,
 /// enriched with file and line context from the thread-local `PANIC_INFO`
 /// cell when available.
+///
+/// The enrichment exists only under the profiling gate (only the profiling
+/// build's hook captures metadata): without the feature the raw panic
+/// message or a fallback string is returned.
 ///
 /// If the custom hook captured location metadata, the output has the form
 /// `file.rs:42 — panic message`. Otherwise, the raw panic message or a
@@ -254,6 +311,9 @@ pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String
         "simulation panicked with non-string payload".to_string()
     };
 
+    // The hook's capture and its counters are machinery of the profiling
+    // gate: without the feature no hook ran, so no metadata can attach.
+    #[cfg(feature = "profiling")]
     if let Some(capture) = take_panic_info() {
         // Increment observer counters when the observe feature is active.
         #[cfg(feature = "observe")]
@@ -276,7 +336,19 @@ pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String
 // tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+// The tests exercise the install machinery, which the profiling feature
+// gates: this crate's own test targets compile with the feature on (the
+// self dev-dependency turns it on for the test targets alone), so the
+// test module rides the same gate as the machinery it proves. The
+// machinery-absent arm of the gate is witnessed by the no-feature
+// workspace compile (the CI clippy matrix's default arm), where the
+// module carries only the error-path survivors and the inert guard
+// shell, and by the standalone path-dependency probe at
+// `tools/panic_hook_gate` (its own workspace, so the leaf's feature is
+// not unified in from another member's dev-dependency; the `panic hook
+// gate` CI job runs both arms, the absence arm watching the default
+// panic report on stderr). See the witness test below.
+#[cfg(all(test, feature = "profiling"))]
 mod tests {
     use super::*;
     use std::panic::{self, AssertUnwindSafe};
@@ -550,5 +622,46 @@ mod tests {
         }));
         assert!(outer.is_ok());
         assert_eq!(outer.unwrap(), fallback);
+    }
+
+    // --- the profiling gate's witness ---
+
+    /// The presence arm of the profiling gate's witness: with the
+    /// feature, the guard installs the real hook and a caught panic's
+    /// message is location-enriched. The absence arm cannot compile
+    /// beside this one (the machinery does not exist without the
+    /// feature), so it is witnessed structurally by the no-feature
+    /// workspace compile and behaviourally by the standalone
+    /// path-dependency probe at `tools/panic_hook_gate` (its own
+    /// workspace, so no other member's dev-dependency unifies the leaf's
+    /// feature in). The probe's child holds a guard and lets a panic
+    /// escape: with the hook installed the default stderr report is
+    /// suppressed, so the probe asserts the report survives exactly when
+    /// the feature is off, and asserts the caught panic's message is
+    /// location-enriched exactly when the feature is on. Against the
+    /// ungated parent the plain run read the report suppressed and the
+    /// message enriched - the red - and against this gate it reads the
+    /// report present and the message raw - the green; the `panic hook
+    /// gate` CI job runs both arms.
+    #[test]
+    fn profiling_gate_carries_the_install_machinery() {
+        let _guard = PanicHookGuard::new();
+        assert!(
+            is_installed(),
+            "with the profiling feature the guard must install the hook"
+        );
+
+        let payload =
+            panic::catch_unwind(AssertUnwindSafe(|| panic!("gate witness panic"))).unwrap_err();
+        let msg = panic_payload_to_string(payload);
+        assert!(
+            msg.contains("panic_hook.rs:"),
+            "with the profiling feature the hook must prefix the message with its file:line \
+             location: {msg}"
+        );
+        assert!(
+            msg.contains("gate witness panic"),
+            "the enriched message must still carry the panic's payload: {msg}"
+        );
     }
 }

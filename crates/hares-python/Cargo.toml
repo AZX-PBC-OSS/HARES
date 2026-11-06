@@ -7,7 +7,11 @@ license.workspace = true
 
 [features]
 observe = ["hares-core/observe"]
-profiling = ["hares-core/profiling"]
+# The profiling summary's gate (core) plus the fleet's hook-install
+# invariant assertions, which read the leaf's panic-hook machinery: a
+# profiling build must carry the fleet's gate as well or those assertions
+# compile out while the hook is installed.
+profiling = ["hares-core/profiling", "hares-fleet/profiling"]
 
 [lib]
 name = "_hares"

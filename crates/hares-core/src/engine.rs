@@ -132,6 +132,7 @@ impl SimulationEngine {
     fn run_finalisation(&self, dwelling: &mut Dwelling) -> Result<Arc<RunResult>, HaresError> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
+        #[cfg(feature = "profiling")]
         {
             assert!(
                 panic_hook::is_installed(),
