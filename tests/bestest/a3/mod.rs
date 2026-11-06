@@ -190,6 +190,10 @@ struct SingleValueRecord {
     /// The computed value; `None` when an operand case has no annual
     /// run (the range case has no result in this submission).
     value_kwh: Option<f64>,
+    /// The operand cases absent from the submission, in range order;
+    /// empty when the value exists. The record names these, never a
+    /// present operand, when it prints a missing result.
+    missing: Vec<&'static str>,
     within: bool,
 }
 
@@ -281,18 +285,36 @@ fn evaluate_single_value_group(
             let subtrahend = runs.get(range.subtrahend);
             // An absolute row's value is the case's own load; a
             // sensitivity row's value is the minuend case's load minus
-            // the subtrahend case's load.
-            let value_kwh = if range.minuend == range.subtrahend {
-                minuend.map(|a| a.load(range.metric))
+            // the subtrahend case's load. A missing operand leaves the
+            // row without a result and is named for the record.
+            let (value_kwh, missing) = if range.minuend == range.subtrahend {
+                match minuend {
+                    Some(a) => (Some(a.load(range.metric)), Vec::new()),
+                    None => (None, vec![range.minuend]),
+                }
             } else {
-                minuend
-                    .zip(subtrahend)
-                    .map(|(a, b)| a.load(range.metric) - b.load(range.metric))
+                match (minuend, subtrahend) {
+                    (Some(a), Some(b)) => (
+                        Some(a.load(range.metric) - b.load(range.metric)),
+                        Vec::new(),
+                    ),
+                    _ => {
+                        let mut missing = Vec::new();
+                        if minuend.is_none() {
+                            missing.push(range.minuend);
+                        }
+                        if subtrahend.is_none() {
+                            missing.push(range.subtrahend);
+                        }
+                        (None, missing)
+                    }
+                }
             };
             let within = value_kwh.is_some_and(|v| within_single_value(range, v));
             SingleValueRecord {
                 range,
                 value_kwh,
+                missing,
                 within,
             }
         })
@@ -454,15 +476,20 @@ fn verdict_report(verdict: &GroupVerdict) -> String {
                 if record.within { "WITHIN" } else { "OUTSIDE" },
                 b8_note
             )),
-            None => out.push_str(&format!(
-                "[A3]   {:>22} {:>19}: NO RESULT (no annual fixture for case {}), \
-                 A3 [{:.0}, {:.0}] kWh\n",
-                range.range_case,
-                range.metric.column_name(),
-                range.minuend,
-                range.min_kwh,
-                range.max_kwh
-            )),
+            None => {
+                let absent = match record.missing.as_slice() {
+                    [case] => format!("case {case}"),
+                    cases => format!("cases {}", cases.to_vec().join(" and ")),
+                };
+                out.push_str(&format!(
+                    "[A3]   {:>22} {:>19}: NO RESULT (no annual fixture for {absent}), \
+                     A3 [{:.0}, {:.0}] kWh\n",
+                    range.range_case,
+                    range.metric.column_name(),
+                    range.min_kwh,
+                    range.max_kwh
+                ));
+            }
         }
     }
     for record in &verdict.time_series {
@@ -948,5 +975,42 @@ mod tests {
             .expect("the 640 - 600 row is pinned");
         assert_eq!(sensitivity.value_kwh, None);
         assert!(!sensitivity.within);
+    }
+
+    /// The record names the operand fixture that is actually absent. A
+    /// sensitivity row whose subtrahend has no run must not report the
+    /// present minuend as missing: the printed record is the operator's
+    /// evidence, and a false case name sends the search to the wrong
+    /// fixture.
+    #[test]
+    fn a3_missing_sensitivity_result_names_the_absent_operand() {
+        use super::{A3Run, evaluate_group, verdict_report};
+        let runs: std::collections::BTreeMap<&'static str, A3Run> = [(
+            "900",
+            A3Run {
+                case_id: "900",
+                heating_kwh: 1342.0,
+                cooling_kwh: 2414.0,
+                hourly: [None, None],
+                hourly_steps: [0; 2],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let verdict = evaluate_group(
+            &data::FABRIC_MINIMUM_CASE_RULES[1],
+            &runs,
+            data::HIGH_MASS_SINGLE_VALUE_RANGES,
+            data::HIGH_MASS_TIME_SERIES_LIMITS,
+        );
+        let report = verdict_report(&verdict);
+        assert!(
+            report.contains("no annual fixture for case 910"),
+            "the 900 - 910 row must name the absent 910, got:\n{report}"
+        );
+        assert!(
+            !report.contains("no annual fixture for case 900"),
+            "the present 900 must not be named as the missing fixture:\n{report}"
+        );
     }
 }
