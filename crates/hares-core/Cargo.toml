@@ -82,6 +82,10 @@ name = "bestest_strict_b8"
 path = "../../tests/bestest_strict_b8.rs"
 
 [[test]]
+name = "etna"
+path = "../../tests/etna/mod.rs"
+
+[[test]]
 name = "conditioned_oracle"
 path = "../../tests/conditioned_oracle.rs"
 
