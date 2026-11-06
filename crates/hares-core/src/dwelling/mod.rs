@@ -2461,6 +2461,45 @@ impl Dwelling {
         path: &Path,
         reports_override: Option<Vec<hares_input::ReportSpec>>,
     ) -> Result<Self> {
+        Self::from_toml_config_with_interior_lwr_method_inner(
+            path,
+            reports_override,
+            hares_envelope::InteriorLwrMethod::StarMesh,
+        )
+    }
+
+    /// The residual-attribution study's explicit interior-LWR construction:
+    /// the same synthetic-TOML path, building the named method instead of
+    /// the production StarMesh selection. Feature `experimental-scriptf`
+    /// only: no production constructor, config field, schema surface or
+    /// TOML key reaches this path, the production default is the
+    /// solver-builder's StarMesh constant in every build configuration,
+    /// and a run built here is experiment-only (the study's arms record
+    /// it; no production number moves).
+    ///
+    /// # Errors
+    ///
+    /// [`HaresError`] exactly as `from_toml_config_with_reports` returns,
+    /// plus nothing: the method selection adds no validation of its own.
+    #[cfg(feature = "experimental-scriptf")]
+    pub fn from_toml_config_with_interior_lwr_method(
+        path: &Path,
+        reports_override: Option<Vec<hares_input::ReportSpec>>,
+        method: hares_envelope::InteriorLwrMethod,
+    ) -> Result<Self> {
+        Self::from_toml_config_with_interior_lwr_method_inner(path, reports_override, method)
+    }
+
+    /// The synthetic-TOML construction both the production wrapper and the
+    /// study's experimental constructor share, with the interior-LWR
+    /// method the assembly bakes in passed through. Without the
+    /// `experimental-scriptf` feature the method is dropped at the
+    /// builder: the production selection is the solver-builder's constant.
+    fn from_toml_config_with_interior_lwr_method_inner(
+        path: &Path,
+        reports_override: Option<Vec<hares_input::ReportSpec>>,
+        method: hares_envelope::InteriorLwrMethod,
+    ) -> Result<Self> {
         let toml_str = std::fs::read_to_string(path)
             .map_err(|err| HaresError::Io(format!("failed to read TOML config: {err}")))?;
         // Removed keys are rejected before deserialising, from the removed-keys
@@ -2556,6 +2595,19 @@ impl Dwelling {
             effective_zone,
         );
         let builder = DwellingBlueprintBuilder::new(inputs, dwelling_config.settings.clone())?;
+        // The method override exists only behind the study's feature; the
+        // production path freezes the builder's StarMesh default (the
+        // solver-builder's selection, untouched).
+        #[cfg(feature = "experimental-scriptf")]
+        let builder = {
+            let mut builder = builder;
+            builder.experimental_interior_lwr_method = method;
+            builder
+        };
+        #[cfg(not(feature = "experimental-scriptf"))]
+        {
+            let _ = method;
+        }
         let blueprint = builder.freeze()?;
         build_from_blueprint(&blueprint)
     }
@@ -3156,6 +3208,15 @@ fn assemble_from_blueprint_with_seed(
     // boundary: the reserved `envelope` override's two factors, unit until
     // a caller names them.
     let envelope_scales = conversions::extract_envelope_scales(config.overrides.as_ref())?;
+    // The interior-LWR method: the production selection is the
+    // solver-builder's StarMesh constant. The residual-attribution study's
+    // explicit construction (the `experimental-scriptf` feature) may name
+    // ScriptF; nothing else reaches this selection, and no config field
+    // or TOML key carries it.
+    #[cfg(feature = "experimental-scriptf")]
+    let interior_lwr_method = bp.experimental_interior_lwr_method;
+    #[cfg(not(feature = "experimental-scriptf"))]
+    let interior_lwr_method = hares_envelope::InteriorLwrMethod::StarMesh;
     let solvers = build_default_solvers(
         &initial_env,
         &config.sim_config,
@@ -3167,6 +3228,7 @@ fn assemble_from_blueprint_with_seed(
             overrides: config.overrides.as_ref(),
             site_elevation_m: site_location.elevation_m,
             envelope_scales: &envelope_scales,
+            interior_lwr_method,
         },
     )?;
 

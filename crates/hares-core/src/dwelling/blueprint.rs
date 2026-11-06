@@ -50,6 +50,15 @@ pub struct DwellingBlueprint {
     /// the inputs' resolution a replay would rebuild, so the dwelling
     /// records `ReplayBlocker::BlueprintEdited` for it.
     pub(super) blueprint_edited: bool,
+    /// The residual-attribution study's experimental interior-LWR method,
+    /// named at the builder by the study's explicit construction path and
+    /// frozen into the blueprint. The production construction never sets
+    /// it off StarMesh (the solver-builder's constant): the field exists
+    /// behind the `experimental-scriptf` feature alone, is reachable from
+    /// no config field, schema surface or TOML key, and its runs are
+    /// experiment-only.
+    #[cfg(feature = "experimental-scriptf")]
+    pub(super) experimental_interior_lwr_method: hares_envelope::InteriorLwrMethod,
     /// The input records of the files the config's parse read: the HPXML,
     /// the schedule when it is a file, the weather with its resolved
     /// format, and the defaults digest. `None` for the synthetic TOML
@@ -243,6 +252,8 @@ impl DwellingBlueprint {
             parsed_civil_tz: self.parsed_civil_tz,
             input_records: self.input_records.clone(),
             blueprint_edited: self.blueprint_edited,
+            #[cfg(feature = "experimental-scriptf")]
+            experimental_interior_lwr_method: self.experimental_interior_lwr_method,
         };
         builder.settings.sim_config.master_seed = master_seed;
         builder.rediversify_schedule()?;
@@ -275,6 +286,12 @@ pub struct DwellingBlueprintBuilder {
     /// Whether a mutator changed the parsed equipment: frozen into the
     /// blueprint as the blueprint-edited replay blocker's record.
     pub(super) blueprint_edited: bool,
+    /// The study's experimental interior-LWR method (the
+    /// `experimental-scriptf` feature): StarMesh at construction, named
+    /// ScriptF only by the study's explicit construction path. Never a
+    /// config or schema surface; see the blueprint field's contract.
+    #[cfg(feature = "experimental-scriptf")]
+    pub(super) experimental_interior_lwr_method: hares_envelope::InteriorLwrMethod,
 }
 
 /// The generated-schedule family's behavioral diversity: a no-CSV
@@ -407,6 +424,8 @@ impl DwellingBlueprintBuilder {
             #[cfg(feature = "dst")]
             parsed_civil_tz,
             blueprint_edited: false,
+            #[cfg(feature = "experimental-scriptf")]
+            experimental_interior_lwr_method: hares_envelope::InteriorLwrMethod::StarMesh,
         })
     }
 
@@ -557,6 +576,8 @@ impl DwellingBlueprintBuilder {
             parsed_civil_tz,
             input_records,
             blueprint_edited,
+            #[cfg(feature = "experimental-scriptf")]
+            experimental_interior_lwr_method,
         } = self;
 
         let step_secs = super::conversions::duration_to_u32_secs(settings.sim_config.time_res)?;
@@ -608,6 +629,8 @@ impl DwellingBlueprintBuilder {
             parsed_civil_tz,
             rng,
             blueprint_edited,
+            #[cfg(feature = "experimental-scriptf")]
+            experimental_interior_lwr_method,
             input_records,
             per_surface_irradiance: std::sync::OnceLock::new(),
         }))
