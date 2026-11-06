@@ -33,3 +33,8 @@ hares-control = { workspace = true }
 # witnesses read the leaf's profiling-gated module: this dev-dependency
 # turns the feature on for the test targets alone.
 hares-types = { workspace = true, features = ["profiling"] }
+# The hook-install invariant assertions sit behind this crate's profiling
+# feature. The test targets install the leaf's hook through the
+# dev-dependency above, so this self dev-dependency turns the assertions
+# on for the tests too: no test arm silently drops the invariant.
+hares-fleet = { workspace = true, features = ["profiling"] }
