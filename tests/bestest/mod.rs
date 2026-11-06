@@ -1,3 +1,4 @@
+mod a3;
 mod cases;
 mod material_check;
 mod reference_bands;
@@ -224,7 +225,10 @@ pub enum ValidationContract {
 /// when its comparison surface is implemented and pinned to a public
 /// source.
 pub fn selected_contracts() -> Vec<ValidationContract> {
-    vec![ValidationContract::AnnexB8ExampleBands]
+    vec![
+        ValidationContract::AnnexB8ExampleBands,
+        ValidationContract::AnnexA3Acceptance,
+    ]
 }
 
 // The A3 acceptance contract must be selectable beside the B8 example
