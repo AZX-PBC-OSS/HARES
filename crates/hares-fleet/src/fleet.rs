@@ -767,6 +767,7 @@ impl Fleet {
     ) -> Result<FleetResult> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
+        #[cfg(feature = "profiling")]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -1756,6 +1757,7 @@ impl SteppableFleet {
 
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
+        #[cfg(feature = "profiling")]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -2239,6 +2241,7 @@ fn step_dwellings_parallel_into(
     debug_assert_eq!(dwellings.len(), results.len());
     let _guard = PanicHookGuard::new();
     #[cfg(debug_assertions)]
+    #[cfg(feature = "profiling")]
     {
         assert!(
             panic_hook::is_installed(),

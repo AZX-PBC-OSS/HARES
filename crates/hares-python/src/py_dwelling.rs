@@ -1011,6 +1011,7 @@ impl PyDwelling {
     pub fn simulate(&self, py: Python<'_>) -> PyResult<PyRunResult> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
+        #[cfg(feature = "profiling")]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -1072,6 +1073,7 @@ impl PyDwelling {
     pub fn finish(&self, py: Python<'_>) -> PyResult<PyRunResult> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
+        #[cfg(feature = "profiling")]
         {
             assert!(
                 panic_hook::is_installed(),
@@ -1128,6 +1130,7 @@ impl PyDwelling {
     pub fn step(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let _guard = PanicHookGuard::new();
         #[cfg(debug_assertions)]
+        #[cfg(feature = "profiling")]
         {
             assert!(
                 panic_hook::is_installed(),

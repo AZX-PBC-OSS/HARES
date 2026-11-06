@@ -7,6 +7,11 @@ license.workspace = true
 
 [features]
 observe = []
+# The panic hook's install machinery is compiled out of no-feature builds
+# (the leaf's profiling gate), and the hook-install invariant's debug
+# assertions above sit in this crate's profiling-gated code, so this gate
+# carries the leaf's.
+profiling = ["hares-types/profiling"]
 
 [dependencies]
 hares-core = { workspace = true }
