@@ -10000,4 +10000,568 @@ mod tests {
             "an ordinary step evaluates the environment half once"
         );
     }
+
+    // ── The environment-half reuse: equivalence and invalidation witnesses ──
+
+    /// One step's observed state for the reuse equivalence comparison: the
+    /// bit patterns of every quantity the step computes or carries (the
+    /// input vector, the state, the exterior fixed point, the ground
+    /// temperatures, the couplings), the typed update, and the diagnostic
+    /// struct's rendering. Bit patterns, not floats: the comparison is
+    /// bitwise, so any semantic delta is visible.
+    struct CacheStepRecord {
+        last_u_bits: Vec<u64>,
+        x_bits: Vec<u64>,
+        ext_temps_bits: Vec<u64>,
+        ground_temps_bits: Vec<u64>,
+        last_coupling_bits: Vec<(usize, u64, u64)>,
+        update: DomainUpdate,
+        gains_debug: String,
+    }
+
+    /// The trajectory's cache mode.
+    #[derive(Clone, Copy)]
+    enum CacheMode {
+        /// The prepare capture stands; the integrate build adopts it when
+        /// the reuse check passes. The shipped behavior.
+        Adopt,
+        /// The capture is dropped after the prepare build, so the integrate
+        /// build re-evaluates the environment half fresh: the pre-reuse
+        /// behavior, the equivalence comparison's reference.
+        Defeated,
+    }
+
+    fn record_cache_step(solver: &ThermalSolver, update: &DomainUpdate) -> CacheStepRecord {
+        CacheStepRecord {
+            last_u_bits: solver.last_u.iter().map(|v| v.to_bits()).collect(),
+            x_bits: solver.x.iter().map(|v| v.to_bits()).collect(),
+            ext_temps_bits: solver
+                .exterior_surface_temps
+                .iter()
+                .map(|v| v.to_bits())
+                .collect(),
+            ground_temps_bits: solver
+                .cached_ground_temps_c
+                .iter()
+                .map(|v| v.to_bits())
+                .collect(),
+            last_coupling_bits: solver
+                .last_coupling
+                .iter()
+                .map(|(idx, d, f)| (*idx, d.to_bits(), f.to_bits()))
+                .collect(),
+            update: update.clone(),
+            gains_debug: format!("{:?}", solver.component_gains),
+        }
+    }
+
+    fn assert_trajectories_bitwise_identical(
+        adopted: &[CacheStepRecord],
+        fresh: &[CacheStepRecord],
+    ) {
+        assert_eq!(adopted.len(), fresh.len(), "the trajectories' step counts");
+        for (step, (a, f)) in adopted.iter().zip(fresh.iter()).enumerate() {
+            assert_eq!(
+                a.last_u_bits, f.last_u_bits,
+                "step {step}: the input vector's bits differ under the reuse"
+            );
+            assert_eq!(
+                a.x_bits, f.x_bits,
+                "step {step}: the state vector's bits differ under the reuse"
+            );
+            assert_eq!(
+                a.ext_temps_bits, f.ext_temps_bits,
+                "step {step}: the exterior fixed point's bits differ under the reuse"
+            );
+            assert_eq!(
+                a.ground_temps_bits, f.ground_temps_bits,
+                "step {step}: the cached ground temperatures' bits differ under the reuse"
+            );
+            assert_eq!(
+                a.last_coupling_bits, f.last_coupling_bits,
+                "step {step}: the coupling tuples' bits differ under the reuse"
+            );
+            assert_eq!(
+                a.update, f.update,
+                "step {step}: the DomainUpdate differs under the reuse"
+            );
+            assert_eq!(
+                a.gains_debug, f.gains_debug,
+                "step {step}: the component diagnostics differ under the reuse"
+            );
+        }
+    }
+
+    /// Runs a two-phase trajectory whose per-step environment and ports
+    /// vary (drifting weather, a marching clock, alternating gains), in the
+    /// given cache mode. `on_step` applies the scenario's own per-step
+    /// variation before the prepare build; the runner applies the
+    /// between-steps shape every scenario shares.
+    fn run_cache_trajectory(
+        make_solver: impl Fn(&EnvironmentState) -> ThermalSolver,
+        mode: CacheMode,
+        steps: usize,
+        mut on_step: impl FnMut(usize, &mut EnvironmentState, &mut PortSlots),
+    ) -> Vec<CacheStepRecord> {
+        let mut env = env_cache_env();
+        let mut solver = make_solver(&env);
+        let mut records = Vec::new();
+        for step in 0..steps {
+            env.weather.outdoor_temp_c = 5.0 + (step % 8) as f64;
+            env.weather.sky_temp_c = env.weather.outdoor_temp_c - 8.0;
+            env.current_time += chrono::Duration::seconds(60);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            ports.thermal[0].sensible_gain_w = 50.0 * (step % 3) as f64;
+            on_step(step, &mut env, &mut ports);
+            solver.prepare_inputs(&ports, &env).unwrap();
+            if matches!(mode, CacheMode::Defeated) {
+                solver.env_cache_valid = false;
+            }
+            let mut out = DomainUpdate::empty(hares_types::THERMAL);
+            solver.integrate(&ports, &env, &mut out).unwrap();
+            records.push(record_cache_step(&solver, &out));
+            // The dwelling's between-steps update: the committed zone
+            // temperature becomes the next step's environment state.
+            env.zones[0].temperature_c = out.zone_temperatures_c[0].1;
+        }
+        records
+    }
+
+    /// The reuse is semantically transparent: with the cache adopted, a
+    /// multi-step trajectory under drifting weather, a marching clock and
+    /// alternating ports produces the same bit patterns in every quantity
+    /// the step computes or carries as the same trajectory with the capture
+    /// dropped and the environment half re-evaluated fresh every build.
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_star_mesh() {
+        let fresh = run_cache_trajectory(env_cache_solver, CacheMode::Defeated, 12, |_, _, _| {});
+        let adopted = run_cache_trajectory(env_cache_solver, CacheMode::Adopt, 12, |_, _, _| {});
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// A ScriptF-mode solver: the standing witness topology plus an interior
+    /// two-surface zone with precomputed ScriptF factors, the interior LWR
+    /// method selected. The interior pass is deliberately NOT part of the
+    /// reuse (its fixed point advances on every pass), so this scenario
+    /// proves the capture's boundary: the interior pass still runs on both
+    /// builds and the trajectory is still bitwise the fresh path's.
+    fn scriptf_cache_solver(env: &EnvironmentState) -> ThermalSolver {
+        let mut solver = env_cache_solver(env);
+        let mut zone = InteriorLwrZoneConfig {
+            zone_id: ZoneId(1),
+            surfaces: vec![
+                InteriorSurfaceInfo {
+                    state_index: 1,
+                    input_index: 2,
+                    area_m2: 12.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
+                    emissivity: 0.90,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 250.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 2,
+                    input_index: 3,
+                    area_m2: 8.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
+                    emissivity: 0.65,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 175.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+            ],
+            scriptf: None,
+        };
+        zone.compute_scriptf();
+        solver.config.interior_lwr_zones = vec![zone];
+        solver.config.interior_lwr_method = crate::boundary_rc::InteriorLwrMethod::ScriptF;
+        // The interior warm starts sized to the zone's surface list: the
+        // constructor sized them against the config the solver was built
+        // with, which carried no interior zones.
+        solver.interior_surface_temps = vec![vec![env.zones[0].temperature_c; 2]];
+        solver.interior_surface_prev_temps = vec![vec![env.zones[0].temperature_c; 2]];
+        solver
+    }
+
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_script_f() {
+        let fresh =
+            run_cache_trajectory(scriptf_cache_solver, CacheMode::Defeated, 12, |_, _, _| {});
+        let adopted =
+            run_cache_trajectory(scriptf_cache_solver, CacheMode::Adopt, 12, |_, _, _| {});
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// The scheduled-ventilation variants: the flow schedule's read selects
+    /// the discretization variant per step, alternating fan-on and fan-off
+    /// hours. The airflow terms are not part of the reuse (they read the
+    /// ports), so the trajectory proves the capture coexists with the
+    /// variant selection and stays bitwise the fresh path's.
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_scheduled_ventilation() {
+        let flow_m3_s = 0.4731_f64;
+        let fresh = run_cache_trajectory(
+            |env| flow_variant_solver(env, &[flow_m3_s]),
+            CacheMode::Defeated,
+            12,
+            |step, env, _| {
+                let payload = env.domains.schedule.payload_mut();
+                payload.clear();
+                payload.push(if step % 2 == 0 { flow_m3_s } else { 0.0 });
+            },
+        );
+        let adopted = run_cache_trajectory(
+            |env| flow_variant_solver(env, &[flow_m3_s]),
+            CacheMode::Adopt,
+            12,
+            |step, env, _| {
+                let payload = env.domains.schedule.payload_mut();
+                payload.clear();
+                payload.push(if step % 2 == 0 { flow_m3_s } else { 0.0 });
+            },
+        );
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// The ideal-capacity dispatch: the target solve runs between the
+    /// phases (its shared prefix filled from the prepare build's last_u),
+    /// and the solved capacity is deposited into the ports the integrate
+    /// build reads. The trajectory proves the capture survives the solve
+    /// and the deposited ports reach the integration, bitwise the fresh
+    /// path's. The deposit is phase-ordered (the solve runs between the
+    /// builds), so the arms run by hand instead of through the generic
+    /// runner.
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_ideal_capacity() {
+        let run = |mode: CacheMode| -> Vec<CacheStepRecord> {
+            let mut env = env_cache_env();
+            let mut solver = env_cache_solver(&env);
+            let mut records = Vec::new();
+            for step in 0..12 {
+                env.weather.outdoor_temp_c = 5.0 + (step % 8) as f64;
+                env.weather.sky_temp_c = env.weather.outdoor_temp_c - 8.0;
+                env.current_time += chrono::Duration::seconds(60);
+                let mut ports = PortSlots {
+                    thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                    ..Default::default()
+                };
+                solver.prepare_inputs(&ports, &env).unwrap();
+                if matches!(mode, CacheMode::Defeated) {
+                    solver.env_cache_valid = false;
+                }
+                // The dispatch: the ideal solve against the prepare build's
+                // inputs, the capacity deposited into the ports.
+                let target = 21.0 + 0.1 * (step % 4) as f64;
+                let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+                ports.thermal[0].sensible_gain_w = capacity;
+                let mut out = DomainUpdate::empty(hares_types::THERMAL);
+                solver.integrate(&ports, &env, &mut out).unwrap();
+                records.push(record_cache_step(&solver, &out));
+                env.zones[0].temperature_c = out.zone_temperatures_c[0].1;
+            }
+            records
+        };
+        let fresh = run(CacheMode::Defeated);
+        let adopted = run(CacheMode::Adopt);
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// The checkpoint/restore control: a mid-run checkpoint written after an
+    /// ordinary step, restored into a fresh solver, and the continued
+    /// trajectory compared bitwise against the uninterrupted one. The
+    /// restore clears the capture, so the restored solver's next step
+    /// re-evaluates the environment half fresh and lands on the same bits.
+    #[test]
+    fn adopted_cache_checkpoint_restore_control_is_bitwise() {
+        let run_until = |mode: CacheMode, restore: Option<usize>| -> Vec<CacheStepRecord> {
+            let mut env = env_cache_env();
+            let mut solver = env_cache_solver(&env);
+            let mut records = Vec::new();
+            let mut snapshot = None;
+            for step in 0..12 {
+                if Some(step) == restore {
+                    let snap = snapshot.take().expect("checkpoint written");
+                    solver.restore_state(&snap).unwrap();
+                }
+                env.weather.outdoor_temp_c = 5.0 + (step % 8) as f64;
+                env.weather.sky_temp_c = env.weather.outdoor_temp_c - 8.0;
+                env.current_time += chrono::Duration::seconds(60);
+                let ports = PortSlots {
+                    thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                    ..Default::default()
+                };
+                solver.prepare_inputs(&ports, &env).unwrap();
+                if matches!(mode, CacheMode::Defeated) {
+                    solver.env_cache_valid = false;
+                }
+                let mut out = DomainUpdate::empty(hares_types::THERMAL);
+                solver.integrate(&ports, &env, &mut out).unwrap();
+                records.push(record_cache_step(&solver, &out));
+                env.zones[0].temperature_c = out.zone_temperatures_c[0].1;
+                if step == 4 {
+                    snapshot = Some(solver.snapshot_state());
+                }
+            }
+            records
+        };
+        // The uninterrupted adopted trajectory is the fresh trajectory's.
+        let fresh = run_until(CacheMode::Defeated, None);
+        let adopted = run_until(CacheMode::Adopt, None);
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+        // The restore control: the adopted trajectory with a mid-run
+        // restore is bitwise the same restore sequence run with the capture
+        // dropped: the restore rolls the state back (its step 6 re-lives
+        // the checkpoint's state, not the uninterrupted step 6's), so the
+        // comparison is against the same sequence, not the uninterrupted
+        // one.
+        let restored_adopted = run_until(CacheMode::Adopt, Some(6));
+        let restored_fresh = run_until(CacheMode::Defeated, Some(6));
+        assert_trajectories_bitwise_identical(&restored_adopted, &restored_fresh);
+    }
+
+    /// An invalidation event's rebuild produces the fresh path's bits, and
+    /// the step that contains the event evaluates the environment half
+    /// twice: the capture is dropped and the integrate build re-evaluates.
+    /// `event` runs between the phases; `reference_event` runs on the
+    /// reference arm where the capture is defeated anyway, so both arms
+    /// apply the same state change at the same point.
+    fn assert_event_rebuilds(
+        mut event: impl FnMut(&mut ThermalSolver, &mut EnvironmentState, &mut PortSlots),
+        mut reference_event: impl FnMut(&mut ThermalSolver, &mut EnvironmentState, &mut PortSlots),
+        label: &'static str,
+    ) {
+        let mut run = |defeat: bool| -> (CacheStepRecord, u64) {
+            let mut env = env_cache_env();
+            let mut solver = env_cache_solver(&env);
+            // Warm the skin fixed points: the steady-state path is the
+            // contract.
+            for _ in 0..5 {
+                solver
+                    .resolve_new(
+                        &PortSlots {
+                            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                            ..Default::default()
+                        },
+                        &env,
+                        std::time::Duration::from_secs(60),
+                    )
+                    .unwrap();
+            }
+            let count_before = solver.environment_evaluations();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            solver.prepare_inputs(&ports, &env).unwrap();
+            if defeat {
+                solver.env_cache_valid = false;
+            }
+            event(&mut solver, &mut env, &mut ports);
+            reference_event(&mut solver, &mut env, &mut ports);
+            let mut out = DomainUpdate::empty(hares_types::THERMAL);
+            solver.integrate(&ports, &env, &mut out).unwrap();
+            let record = record_cache_step(&solver, &out);
+            (record, solver.environment_evaluations() - count_before)
+        };
+        // The reference arm: the capture defeated AND the event applied, so
+        // the compare isolates the reuse, not the event.
+        let (fresh, fresh_count) = run(true);
+        let (adopted, adopted_count) = run(false);
+        assert_eq!(
+            adopted.last_u_bits, fresh.last_u_bits,
+            "{label}: the rebuilt step's input vector is not the fresh path's bits"
+        );
+        assert_eq!(adopted.x_bits, fresh.x_bits, "{label}: state bits");
+        assert_eq!(
+            adopted.ext_temps_bits, fresh.ext_temps_bits,
+            "{label}: exterior fixed point bits"
+        );
+        assert_eq!(
+            adopted.ground_temps_bits, fresh.ground_temps_bits,
+            "{label}: ground temperature bits"
+        );
+        assert_eq!(
+            adopted.last_coupling_bits, fresh.last_coupling_bits,
+            "{label}: coupling bits"
+        );
+        assert_eq!(adopted.update, fresh.update, "{label}: DomainUpdate");
+        assert_eq!(
+            adopted.gains_debug, fresh.gains_debug,
+            "{label}: component diagnostics"
+        );
+        assert_eq!(
+            adopted_count, 2,
+            "{label}: the invalidation event must rebuild (two evaluations in the step)"
+        );
+        assert_eq!(fresh_count, 2, "{label}: the reference arm's own count");
+    }
+
+    /// A solar override between the phases: the irradiance the environment
+    /// half reads changes, so the reuse must drop and the integrate build
+    /// must see the new sun.
+    #[test]
+    fn a_solar_override_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, env, _| {
+                env.weather.solar_irradiance[0].direct_w_m2 = 850.0;
+                env.weather.solar_irradiance[1].direct_w_m2 = 400.0;
+                let _ = solver;
+            },
+            |_, _, _| {},
+            "solar override",
+        );
+    }
+
+    /// An exterior-surface fixed-point update between the phases: the warm
+    /// start the capture's iteration ran from changes, so the reuse must
+    /// drop and the integrate build must iterate from the updated skin.
+    #[test]
+    fn an_exterior_fixed_point_update_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, _, _| {
+                solver.exterior_surface_temps[0] = 41.3;
+            },
+            |_, _, _| {},
+            "exterior fixed-point update",
+        );
+    }
+
+    /// A restore between the phases: `restore_state` clears the capture,
+    /// so the integrate build re-evaluates. The restore here is
+    /// content-neutral (the solver's own post-prepare state written back),
+    /// which isolates the clearing: the reuse check itself would pass on
+    /// this state, so the rebuild proves the restore's invalidation fired.
+    #[test]
+    fn a_restore_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, _, _| {
+                let snap = solver.snapshot_state();
+                solver.restore_state(&snap).unwrap();
+            },
+            |_, _, _| {},
+            "restore",
+        );
+    }
+
+    /// A schedule/environment identity change between the phases: the clock
+    /// and the schedule row move, so the reuse must drop.
+    #[test]
+    fn a_schedule_or_environment_identity_change_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |_, env, _| {
+                env.current_time += chrono::Duration::seconds(60);
+                env.schedule_row = Some(7);
+            },
+            |_, _, _| {},
+            "schedule/environment identity change",
+        );
+    }
+
+    /// A thermal state change between the phases: the state vector the
+    /// environment half read changes, so the reuse must drop.
+    #[test]
+    fn a_thermal_state_change_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, _, _| {
+                solver.x[1] = 31.5;
+            },
+            |_, _, _| {},
+            "thermal state change",
+        );
+    }
+
+    /// A timestep change voids the capture's identity. The public integrate
+    /// rejects a changed timestep by its own dt assertion in debug builds;
+    /// the identity check is the release-build guard, so the witness runs
+    /// against the check directly.
+    #[test]
+    fn a_timestep_change_voids_the_capture_identity() {
+        let env = env_cache_env();
+        let mut solver = env_cache_solver(&env);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        solver.prepare_inputs(&ports, &env).unwrap();
+        assert!(solver.env_cache_valid, "the prepare build stages a capture");
+        let mut env_changed = env.clone();
+        env_changed.time_res = chrono::Duration::seconds(120);
+        assert!(
+            !solver.env_cache_reusable(&env_changed),
+            "a timestep change must void the capture's identity"
+        );
+        assert!(
+            solver.env_cache_reusable(&env),
+            "the unchanged environment must keep the capture's identity"
+        );
+    }
+
+    /// The post-dispatch ports reach the integration exactly once through
+    /// the reuse: a two-phase step whose ports change between the phases is
+    /// bitwise the single-call resolve with the post-dispatch ports, and
+    /// the step still evaluated the environment half once.
+    #[test]
+    fn post_dispatch_ports_reach_the_integrated_vector_through_the_cache() {
+        let env = env_cache_env();
+        let ports_zero = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut ports_hvac = ports_zero.clone();
+        ports_hvac.thermal[0].sensible_gain_w = 1000.0;
+        ports_hvac.thermal[0].radiant_gain_w = 300.0;
+        ports_hvac.thermal[0].shortwave_gain_w = 75.0;
+
+        // Two-phase with the dispatch between the phases (the cache adopted).
+        let mut solver = env_cache_solver(&env);
+        solver.prepare_inputs(&ports_zero, &env).unwrap();
+        let mut out_split = DomainUpdate::empty(hares_types::THERMAL);
+        solver.integrate(&ports_hvac, &env, &mut out_split).unwrap();
+
+        // Single call with the post-dispatch ports.
+        let mut solver_ref = env_cache_solver(&env);
+        let out_ref = solver_ref
+            .resolve_new(&ports_hvac, &env, std::time::Duration::from_secs(60))
+            .unwrap();
+
+        assert_eq!(
+            out_split, out_ref,
+            "the two-phase step with the dispatch between the phases must be \
+             bitwise the single-call resolve with the post-dispatch ports"
+        );
+        assert_eq!(
+            solver
+                .last_u
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            solver_ref
+                .last_u
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            "the rebuilt input vector's bits"
+        );
+        assert_eq!(
+            solver.x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            solver_ref.x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "the post-step state's bits"
+        );
+        assert_eq!(
+            format!("{:?}", solver.component_gains),
+            format!("{:?}", solver_ref.component_gains),
+            "the component diagnostics must carry the post-dispatch ports' \
+             contributions exactly once"
+        );
+    }
 }
