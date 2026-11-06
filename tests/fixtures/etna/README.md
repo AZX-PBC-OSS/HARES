@@ -72,7 +72,7 @@ integrity test asserts the per-group null counts match the numbers above.
    count; record the program versions from the addendum's Informative
    Annex B8.4.4 nomenclature.
 5. Write with `json.dumps(indent=1, sort_keys=True)` and record the
-   output's sha256 in `et_cases.toml`'s integrity test.
+   output's sha256 in the loader's hash pins (`tests/etna/measured.rs`).
 
 ## Units
 

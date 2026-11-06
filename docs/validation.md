@@ -270,8 +270,8 @@ Melun, France) compare simulated heater energy against measured data
 within the measurement's uncertainty: a physical truth standard,
 unlike the Section 7 comparative bands.
 
-Location: `tests/etna/` (its own test target, `cargo nextest --test
-etna`), separate from the annual BESTEST module by construction: no
+Location: `tests/etna/` (its own test target, `cargo nextest run
+--test etna`), separate from the annual BESTEST module by construction: no
 shared file, and the Section 7 core reference bands
 (`tests/bestest/reference_bands.rs`) carry no Section 13 identifier
 (the separation has its own test).
@@ -366,7 +366,7 @@ conformance claim is made or implied until then.
 ### Running the empirical suite
 
 ```bash
-cargo nextest -p hares-core --test etna
+cargo nextest run -p hares-core --test etna
 ```
 
 ---
