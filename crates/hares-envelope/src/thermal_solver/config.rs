@@ -1179,6 +1179,15 @@ pub struct EnvelopeComponentGains {
     /// close, and this count is where that shows.
     #[cfg(feature = "observe")]
     pub skin_iteration_cap_exits: u64,
+    /// Interior-convection injections whose per-step TARP correction was
+    /// withheld this step because the TARP coefficient did not exceed the
+    /// frozen static film (`delta_h <= 0`, Walton 1983 NBSSIR 83-2655
+    /// Eqs. 90-92 against the ASHRAE Simple value): the T-0034 documented
+    /// limitation's per-step reach. Zero whenever the film model is not
+    /// `PerStepTarp` - the production default's own state, the frozen
+    /// film the A-matrix carries - so a zero count is the disabled
+    /// correction, not an immaterial limitation.
+    pub tarp_negative_delta_skips: u64,
     /// The largest exterior-skin residual this step (K): the greatest
     /// |t_skin − F| against the skin's own fixed point
     /// F = t_init + (solar + lwr)·rad_res over the iterative-path
@@ -1257,6 +1266,7 @@ impl Clone for EnvelopeComponentGains {
             natural_ventilation_wind_angle_deg: self.natural_ventilation_wind_angle_deg,
             #[cfg(feature = "observe")]
             skin_iteration_cap_exits: self.skin_iteration_cap_exits,
+            tarp_negative_delta_skips: self.tarp_negative_delta_skips,
             #[cfg(feature = "observe")]
             max_skin_residual_k: self.max_skin_residual_k,
             air_density_kg_m3: self.air_density_kg_m3,
@@ -1327,6 +1337,7 @@ impl Clone for EnvelopeComponentGains {
             self.skin_iteration_cap_exits = source.skin_iteration_cap_exits;
             self.max_skin_residual_k = source.max_skin_residual_k;
         }
+        self.tarp_negative_delta_skips = source.tarp_negative_delta_skips;
         self.air_density_kg_m3 = source.air_density_kg_m3;
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         {
