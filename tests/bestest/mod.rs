@@ -544,6 +544,72 @@ fn in_depth_fixtures_carry_the_standards_ir_emittance() {
     }
 }
 
+/// The BESTEST gains family's case-input contract: ASHRAE 140-2017
+/// Addendum a Section 5.2.1.7 (the clause 140-2023 Section 7's fabric
+/// specification carries) declares the internal gains 200 W, 100% sensible,
+/// 60% radiative and 40% convective, and every gains-bearing case fixture
+/// declares that 0.6 radiant fraction. The test enumerates exactly the eight
+/// gains-bearing fixtures and proves the parse path reaches each declared
+/// value: one step of the assembled dwelling emits the split through the
+/// fixture-to-HPXML-to-port chain (`internal_gains_radiant_fraction` ->
+/// `FracRadiant` -> the plug load's gain fractions -> the port's
+/// `radiant_gain_w`). The ideal HVAC's port carries `radiant_gain_w: 0.0`,
+/// so the port's radiant total is the gains' share alone, and the ratio
+/// against the internal-gain category total is the declared fraction
+/// exactly. The schedule's flat hourly row reads 0.04167 (200.008 W over
+/// the day's 24 rows), so the watts carry the same 1 W allowance the
+/// no-occupancy pin below uses.
+#[test]
+fn bestest_gains_fixtures_carry_the_standards_sixty_forty_split() {
+    const GAINS_FAMILY: [&str; 8] = ["600", "600FF", "640", "650", "900", "900FF", "920", "950"];
+    let registry: Vec<_> = core_cases().into_iter().chain(extended_cases()).collect();
+    let family: Vec<_> = GAINS_FAMILY
+        .iter()
+        .map(|id| {
+            registry
+                .iter()
+                .find(|c| c.id == *id)
+                .unwrap_or_else(|| panic!("case {id} is in the BESTEST case registry"))
+        })
+        .collect();
+    assert_eq!(
+        family.len(),
+        GAINS_FAMILY.len(),
+        "the gains family enumerates exactly the eight gains-bearing fixtures"
+    );
+    for case in family {
+        let mut dwelling =
+            Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+                .unwrap_or_else(|err| panic!("case {} builds: {err}", case.id));
+        dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("case {} steps: {err}", case.id));
+        let gains = dwelling.thermal_solver().component_gains();
+        assert!(
+            gains.internal_gain_w > 0.0,
+            "case {}: the declared 200 W gains reach the first step",
+            case.id
+        );
+        let emitted_fraction = gains.port_radiant_w / gains.internal_gain_w;
+        assert!(
+            (emitted_fraction - 0.6).abs() < 1e-9,
+            "case {}: ASHRAE 140-2017 Addendum a Section 5.2.1.7's internal gains \
+             are 60% radiative; the fixture's emitted radiant fraction is \
+             {emitted_fraction} ({} W of {} W)",
+            case.id,
+            gains.port_radiant_w,
+            gains.internal_gain_w
+        );
+        assert!(
+            (gains.port_radiant_w - 120.0).abs() <= 1.0,
+            "case {}: the declared 200 W at 60% radiative emits 120 W radiant; \
+             the port carries {} W",
+            case.id,
+            gains.port_radiant_w
+        );
+    }
+}
+
 /// ASHRAE 140's BESTEST cases carry no occupants: their internal gains are
 /// the declared 200 W (Case 920's Table B1-3 row), not an occupancy gain on
 /// top. The synthetic schedule defaults to one occupant when the
