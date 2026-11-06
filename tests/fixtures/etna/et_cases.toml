@@ -1,0 +1,161 @@
+# The six ASHRAE 140-2023 Addendum b Section 13 empirical-validation case
+# contracts (the ETNA twin-cell steady-state suite), as data.
+#
+# Each entry pins one case's identity (the addendum's Table 13-1 row and
+# its Section 13.2 specification), the measured dataset it compares
+# against, the best steady-state comparison window (the case's own
+# steady-state criterion, addendum Sections 13.3.2.4.1 through
+# 13.3.7.4.1), the measured comparison values with their uncertainty
+# bounds, and the acceptance thresholds. Values are carried with units in
+# the key names; the whole file is the contract the empirical-validation
+# kernel and the case comparisons read.
+#
+# Sources (hash-pinned in README.md and asserted by the etna test target):
+# - The addendum PDF
+#   https://www.ashrae.org/file%20library/technical%20resources/standards%20and%20guidelines/standards%20addenda/140_2023_b_20260424.pdf
+#   sha256 7257eb68b09faa3c9350cb9bc85a8e6c5b5fd89985c7adc07a070b84aca267df
+#   (case specifications, Table 13-1, the comparison windows in
+#   13.3.2.4.1/13.3.3.4.1/13.3.4.3.1/13.3.5.3.1/13.3.6.4.1/13.3.7.4.1,
+#   the u(Qhtr) percentages in the Qhtr-comparison notes)
+# - The archive's MeasurementData.json (byte-exact in this directory):
+#   the hourly measured series and the propagated uncertainty bands.
+# - The archive's ET_config.yaml (byte-exact in this directory): the
+#   best_ss_time_periods and the AccCrit_Ke_CVRMSE thresholds.
+#
+# Time convention: GMT+1, preceding-hour (hour 10:00 = 09:00-10:00),
+# addendum Sections 13.2.1.1 and 13.3.1.c.
+
+[[case]]
+id = "ET110A1"
+description = "Artificial climate, base case: steady-state overall building loss coefficient with insulated windows, Cell A, constant combined interior surface heat transfer coefficients"
+cell = "A"
+window_insulated = true
+interior_surface_ht = "constant_combined"
+base_case = ""
+specification_section = "13.2.2"
+comparison_section = "13.3.2"
+dataset_group = "ET110A"
+best_steady_state_start = "2000-02-10T16:00:00+01:00"
+best_steady_state_end = "2000-02-11T09:00:00+01:00"
+window_hours = 18
+# u(Qhtr), addendum 13.3.2.4.2 informative note 1 (2-sigma, 95% confidence)
+qhtr_uncertainty_rel = 0.009
+# The archive's ET_config.yaml AccCrit_Ke_CVRMSE: the informative
+# acceptance criterion on the hourly Qhtr CV(RMSE) against the measured
+# average over the window (the analysis bundle's ET_AccCrit_processor.py
+# applies a max(1% of threshold, 0.01%) rounding tolerance, B12.2).
+qhtr_acccrit_cvrmse_max = 0.0099
+# Measured best steady-state hourly-integrated heater energy [Wh] and the
+# propagated uncertainty bounds (MeasurementData.json, in-window columns).
+qhtr_measured_avg_wh = 634.7484837222223
+qhtr_measured_lower_wh = 628.4484837222224
+qhtr_measured_upper_wh = 641.0484837222223
+
+[[case]]
+id = "ET110B1"
+description = "Artificial climate: steady-state overall building loss coefficient with insulated windows, Cell B, constant combined interior surface heat transfer coefficients (extension of Case ET110A1 to Cell B)"
+cell = "B"
+window_insulated = true
+interior_surface_ht = "constant_combined"
+base_case = "ET110A1"
+specification_section = "13.2.3"
+comparison_section = "13.3.3"
+dataset_group = "ET110B"
+best_steady_state_start = "2000-02-10T16:00:00+01:00"
+best_steady_state_end = "2000-02-11T09:00:00+01:00"
+window_hours = 18
+# u(Qhtr), addendum 13.3.3.4.2 informative note 1
+qhtr_uncertainty_rel = 0.010
+qhtr_acccrit_cvrmse_max = 0.0109
+qhtr_measured_avg_wh = 640.3950512222223
+qhtr_measured_lower_wh = 633.3750512222223
+qhtr_measured_upper_wh = 647.4150512222222
+
+[[case]]
+id = "ET100A1"
+description = "Artificial climate: steady-state overall building loss coefficient with uninsulated windows, Cell A, constant combined interior surface heat transfer coefficients (Case ET110A1 with the window insulation removed)"
+cell = "A"
+window_insulated = false
+interior_surface_ht = "constant_combined"
+base_case = "ET110A1"
+specification_section = "13.2.4"
+comparison_section = "13.3.4"
+dataset_group = "ET100A"
+best_steady_state_start = "2000-09-16T08:00:00+01:00"
+best_steady_state_end = "2000-09-18T14:00:00+01:00"
+window_hours = 55
+# u(Qhtr), addendum 13.3.4.3.2 informative note 1
+qhtr_uncertainty_rel = 0.007
+qhtr_acccrit_cvrmse_max = 0.0074
+qhtr_measured_avg_wh = 736.6145791636366
+qhtr_measured_lower_wh = 731.1345791636365
+qhtr_measured_upper_wh = 742.0945791636366
+
+[[case]]
+id = "ET100B1"
+description = "Artificial climate: steady-state overall building loss coefficient with uninsulated windows, Cell B, constant combined interior surface heat transfer coefficients (Case ET110B1 with the window insulation removed)"
+cell = "B"
+window_insulated = false
+interior_surface_ht = "constant_combined"
+base_case = "ET110B1"
+specification_section = "13.2.5"
+comparison_section = "13.3.5"
+dataset_group = "ET100B"
+# The addendum's 13.3.5.3.1 sets ET100B1's best steady-state period equal
+# to ET100A1's; the comparison takes the last 56 rows of the csv file
+# excluding the final row, the same 55 hourly values the ET100A window
+# covers in the ET100B series.
+best_steady_state_start = "2000-09-16T08:00:00+01:00"
+best_steady_state_end = "2000-09-18T14:00:00+01:00"
+window_hours = 55
+# u(Qhtr), addendum 13.3.5.3.2 informative note 1
+qhtr_uncertainty_rel = 0.009
+qhtr_acccrit_cvrmse_max = 0.0096
+qhtr_measured_avg_wh = 737.5897527272725
+qhtr_measured_lower_wh = 730.4697527272725
+qhtr_measured_upper_wh = 744.7097527272725
+
+[[case]]
+id = "ET100A3"
+description = "Artificial climate: steady-state overall building loss coefficient with uninsulated windows, Cell A, user-selected interior surface heat transfer algorithms (Case ET100A1 with the constant combined interior coefficients replaced by the program's own algorithms)"
+cell = "A"
+window_insulated = false
+interior_surface_ht = "program_selected"
+base_case = "ET100A1"
+specification_section = "13.2.6"
+comparison_section = "13.3.6"
+dataset_group = "ET100A"
+# The addendum's 13.3.6.4.1 sets ET100A3's best steady-state period equal
+# to ET100A1's.
+best_steady_state_start = "2000-09-16T08:00:00+01:00"
+best_steady_state_end = "2000-09-18T14:00:00+01:00"
+window_hours = 55
+# u(Qhtr), addendum 13.3.6.4.2 informative note 1
+qhtr_uncertainty_rel = 0.007
+qhtr_acccrit_cvrmse_max = 0.0186
+qhtr_measured_avg_wh = 736.6145791636366
+qhtr_measured_lower_wh = 731.1345791636365
+qhtr_measured_upper_wh = 742.0945791636366
+
+[[case]]
+id = "ET100B3"
+description = "Artificial climate: steady-state overall building loss coefficient with uninsulated windows, Cell B, user-selected interior surface heat transfer algorithms (Case ET100B1 with the constant combined interior coefficients replaced by the program's own algorithms)"
+cell = "B"
+window_insulated = false
+interior_surface_ht = "program_selected"
+base_case = "ET100B1"
+specification_section = "13.2.7"
+comparison_section = "13.3.7"
+dataset_group = "ET100B"
+# The addendum's 13.3.7.4.1 sets ET100B3's best steady-state period equal
+# to ET100A1's; the comparison takes the last 56 rows of the csv file
+# excluding the final row, as for ET100B1.
+best_steady_state_start = "2000-09-16T08:00:00+01:00"
+best_steady_state_end = "2000-09-18T14:00:00+01:00"
+window_hours = 55
+# u(Qhtr), addendum 13.3.7.4.2 informative note 1
+qhtr_uncertainty_rel = 0.009
+qhtr_acccrit_cvrmse_max = 0.0241
+qhtr_measured_avg_wh = 737.5897527272725
+qhtr_measured_lower_wh = 730.4697527272725
+qhtr_measured_upper_wh = 744.7097527272725
