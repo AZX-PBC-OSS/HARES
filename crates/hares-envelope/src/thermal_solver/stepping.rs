@@ -689,6 +689,11 @@ impl ThermalSolver {
         }
 
         let dt = self.dt_s;
+        // Per-step count: the injections this coupling build withheld. The
+        // skip condition reads the state only (the films and the state
+        // temperatures), so the prepare and integrate builds count the
+        // same skips and the step's count is exact either way.
+        self.tarp_negative_delta_skips = 0;
 
         for (i, inj) in self
             .config
@@ -728,6 +733,9 @@ impl ThermalSolver {
             // Full correction requires partial A-matrix reassembly (approach (a)
             // in the ticket), which recomputes the affected rows each timestep.
             if delta_h <= 0.0 {
+                // The withheld correction is the documented limitation's
+                // reach: counted per injection, in every build profile.
+                self.tarp_negative_delta_skips += 1;
                 continue;
             }
 
@@ -810,6 +818,10 @@ impl ThermalSolver {
         // (semi-implicit: the diagonal coupling is added to the identity,
         // forming I + D; off-diagonal terms act as explicit forcing).
         self.apply_convection_forcing();
+        // The withheld-TARP-correction count is known only now (the forcing
+        // ran above): the count the pre-step input assembly carried was the
+        // placeholder. This step's own count replaces it.
+        self.component_gains.tarp_negative_delta_skips = self.tarp_negative_delta_skips;
 
         // Record each zone's non-HVAC share of the sensible input column for
         // the next ideal-capacity solve: the full port accumulation (this

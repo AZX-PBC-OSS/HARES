@@ -183,6 +183,13 @@ pub struct ThermalSolver {
     /// separately for diagnostic reporting because neither path's `u` delta
     /// isolates the LWR component.
     opaque_exterior_lwr_w: f64,
+    /// Interior-convection injections whose per-step TARP coefficient did
+    /// not exceed the frozen static film this step (the T-0034
+    /// limitation's reach: the correction is withheld, the A-matrix's
+    /// frozen value stands). Counted in `apply_convection_forcing` in
+    /// every build profile; the count is zero whenever the film model is
+    /// not `PerStepTarp`, which is the production default's own state.
+    tarp_negative_delta_skips: u64,
     /// Exact discrete-time matrix exchange into the indoor zone air node
     /// [W/K]: `C_zone/dt · (A_d − I)[zone_row, :]` — the zone air's RC
     /// exchange per unit of state. Computed once at construction; dotted
@@ -1455,6 +1462,7 @@ impl ThermalSolver {
             #[cfg(feature = "observe")]
             skin_lag_warned: false,
             opaque_exterior_lwr_w: 0.0,
+            tarp_negative_delta_skips: 0,
             solar_irr_slot_buf: HashMap::with_capacity(n_ext_surfaces),
             solar_slot_map_keys: Vec::with_capacity(env.weather.solar_irradiance.len()),
             zone_exchange_row_w,
@@ -1794,6 +1802,10 @@ impl ThermalSolver {
             opaque_solar_w,
             exterior_lwr_w,
             window_exterior_lwr_w: self.window_exterior_lwr_w,
+            // Pre-step placeholder: the forcing that counts the skips runs
+            // later in the step; integrate's end overwrites this with the
+            // step's own count.
+            tarp_negative_delta_skips: self.tarp_negative_delta_skips,
             total_airflow_m3_s: indoor_inf.map(|c| c.combined_flow_m3_s).unwrap_or(0.0),
             raw_infiltration_m3_s: indoor_inf.map(|c| c.raw_inf_m3_s).unwrap_or(0.0),
             forced_vent_m3_s: indoor_inf.map(|c| c.forced_flow_m3_s).unwrap_or(0.0),
@@ -2051,10 +2063,10 @@ mod tests {
     use crate::state_space::{OutputMapping, StateSpaceModel, VentilationFlowModel};
     use crate::thermal_solver::{
         BoundaryCategory, DrivingTemp, ExteriorSurfaceInfo, FilmCoefficientModel,
-        InfiltrationMethod, InteriorLwrZoneConfig, InteriorSolarSurfaceInfo,
-        InteriorSolarZoneConfig, InteriorSurfaceInfo, MechanicalVentilationParams,
-        NaturalVentilationConfig, StateSpaceWiring, ThermalSolver, ThermalSolverConfig,
-        ThermalSolverError, WindowSolarProperties,
+        InfiltrationMethod, InteriorConvectionInjection, InteriorLwrZoneConfig,
+        InteriorSolarSurfaceInfo, InteriorSolarZoneConfig, InteriorSurfaceInfo,
+        MechanicalVentilationParams, NaturalVentilationConfig, StateSpaceWiring, ThermalSolver,
+        ThermalSolverConfig, ThermalSolverError, WindowSolarProperties,
     };
 
     fn env_for_temp(zone_temp: f64, outdoor_temp: f64) -> EnvironmentState {
@@ -7954,6 +7966,136 @@ mod tests {
             rel_err < 0.20,
             "wall_gain={wall_gain:.2} W deviates from TARP prediction {q_tarp:.2} W by {:.1}%",
             rel_err * 100.0
+        );
+    }
+
+    /// The withheld-TARP-correction counter counts the T-0034 limitation's
+    /// reach when the per-step correction is armed. The armed solver
+    /// (PerStepTarp, one interior-convection injection, vertical wall,
+    /// static film 1/3.076) runs one step at two states:
+    ///
+    /// - Wall at 21 °C, zone at 20 °C (ΔT = 1 K): the TARP coefficient
+    ///   1.31·ΔT^(1/3) = 1.31 W/(m²·K) sits below the frozen static
+    ///   3.076, the correction is withheld (the A-matrix's frozen value
+    ///   stands), and the counter reads 1.
+    /// - Wall at 40 °C, zone at 20 °C (ΔT = 20 K): the TARP coefficient
+    ///   1.31·20^(1/3) = 3.556 W/(m²·K) exceeds the frozen static, the
+    ///   correction applies, and the counter reads 0.
+    ///
+    /// The thresholds are the two correlations' own crossover: the TARP
+    /// coefficient passes the ASHRAE Simple vertical value first at
+    /// ΔT = (3.076/1.31)³ ≈ 16.8 K (Walton 1983 NBSSIR 83-2655 Eqs. 90-92
+    /// against ASHRAE 1985 Table 1).
+    #[test]
+    fn tarp_negative_delta_skip_counter_counts_the_withheld_correction() {
+        let indoor = 20.0;
+        let outdoor = 20.0;
+        let env = env_for_temp(indoor, outdoor);
+
+        let r_zw = 0.5;
+        let c_z = 50_000.0;
+        let c_w = 500_000.0;
+        let a_c = DMatrix::from_row_slice(
+            2,
+            2,
+            &[
+                -1.0 / (r_zw * c_z),
+                1.0 / (r_zw * c_z),
+                1.0 / (r_zw * c_w),
+                -1.0 / (r_zw * c_w),
+            ],
+        );
+        let b_c = DMatrix::zeros(2, 2);
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 1)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![],
+            ground_temp_input_depths_m: vec![],
+            indoor_temp_input_indices: vec![],
+            solar_input_indices: HashMap::new(),
+            c_zone_j_k: HashMap::new(),
+            node_capacitances: HashMap::new(),
+            node_index: HashMap::new(),
+        };
+        let area_m2 = 10.0;
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::new(),
+            window_zone_ids: HashMap::new(),
+            window_ids_sorted: Vec::new(),
+            exterior_surfaces: vec![],
+            interior_lwr_zones: vec![],
+            infiltration: vec![],
+            ventilation_flow_m3_s: 0.0,
+            ventilation: MechanicalVentilationParams::default(),
+            natural_ventilation: None,
+            supply_duct_leakage_m3_s: 0.0,
+            return_duct_leakage_m3_s: 0.0,
+            interior_lwr_method: crate::boundary_rc::InteriorLwrMethod::StarMesh,
+            interior_solar_zones: Vec::new(),
+            boundary_diagnostics: vec![],
+            film_coefficient_model: FilmCoefficientModel::PerStepTarp,
+            interior_convection_injections: vec![InteriorConvectionInjection {
+                surface_state_index: 1,
+                zone_state_index: 0,
+                area_m2,
+                tilt_deg: 90.0,
+                static_r_film_int_m2_k_w: 1.0 / 3.076,
+                c_surface_j_k: c_w,
+                c_zone_j_k: c_z,
+            }],
+            ideal_capacity_degraded_threshold: 3,
+        };
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+
+        // ΔT = 1 K: the TARP coefficient sits below the frozen static, the
+        // correction is withheld, the counter reads the skip.
+        let mut solver = ThermalSolver::new(
+            model.clone(),
+            wiring.clone(),
+            config.clone(),
+            60.0,
+            &env,
+            indoor,
+        )
+        .unwrap();
+        solver.x[0] = 20.0;
+        solver.x[1] = 21.0;
+        let mut update = DomainUpdate::empty(hares_types::THERMAL);
+        solver
+            .resolve(&ports, &env, Duration::from_secs(60), &mut update)
+            .unwrap();
+        assert_eq!(
+            solver.component_gains().tarp_negative_delta_skips,
+            1,
+            "the withheld correction at ΔT = 1 K is the T-0034 limitation's \
+             one counted skip"
+        );
+
+        // ΔT = 20 K: the TARP coefficient exceeds the frozen static, the
+        // correction applies, the counter reads zero.
+        let mut solver = ThermalSolver::new(model, wiring, config, 60.0, &env, indoor).unwrap();
+        solver.x[0] = 20.0;
+        solver.x[1] = 40.0;
+        let mut update = DomainUpdate::empty(hares_types::THERMAL);
+        solver
+            .resolve(&ports, &env, Duration::from_secs(60), &mut update)
+            .unwrap();
+        assert_eq!(
+            solver.component_gains().tarp_negative_delta_skips,
+            0,
+            "the applied correction at ΔT = 20 K counts no skip"
         );
     }
 

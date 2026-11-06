@@ -14,6 +14,13 @@ profiling = ["hares-types/profiling"]
 observe = ["hares-types/observe", "hares-input/observe", "hares-output/observe", "hares-equipment/observe", "hares-envelope/observe", "hares-physics/observe", "hares-tariff/observe"]
 observe_detailed = ["observe", "hares-envelope/observe_detailed"]
 dst = []
+# The residual-attribution study's explicit interior-LWR construction
+# path: `Dwelling::from_toml_config_with_interior_lwr_method` and the
+# builder/blueprint field it names. Never enabled by another feature and
+# never enabled by default: the production selection is the
+# solver-builder's StarMesh constant in every configuration, and the
+# feature only admits the study's experiment-only construction.
+experimental-scriptf = []
 
 [dependencies]
 hares-types = { workspace = true }
@@ -69,6 +76,10 @@ path = "../../tests/parity/mod.rs"
 [[test]]
 name = "bestest"
 path = "../../tests/bestest/mod.rs"
+
+[[test]]
+name = "bestest_strict_b8"
+path = "../../tests/bestest_strict_b8.rs"
 
 [[test]]
 name = "conditioned_oracle"

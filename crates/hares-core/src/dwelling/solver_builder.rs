@@ -857,6 +857,13 @@ pub(crate) struct SolverInputs<'a> {
     pub overrides: Option<&'a Value>,
     pub site_elevation_m: f64,
     pub envelope_scales: &'a hares_input::EnvelopeScales,
+    /// The interior-LWR method the assembly bakes in. The production
+    /// construction passes the solver-builder's StarMesh constant; the
+    /// residual-attribution study's experimental construction (the
+    /// `experimental-scriptf` feature) may name the other variant
+    /// explicitly. No config field, schema surface or TOML key selects
+    /// the method, so the production default cannot switch silently.
+    pub interior_lwr_method: hares_envelope::InteriorLwrMethod,
 }
 
 pub(crate) fn build_default_solvers(
@@ -875,6 +882,7 @@ pub(crate) fn build_default_solvers(
         overrides,
         site_elevation_m,
         envelope_scales,
+        interior_lwr_method,
     } = inputs;
     let n_zones = env.zones.len().max(1);
 
@@ -909,8 +917,10 @@ pub(crate) fn build_default_solvers(
     // Build the RC network from material layers where available.
     // StarMesh mode bakes linearized inter-surface radiation conductances
     // into the A-matrix at construction time. ScriptF mode preserves the
-    // iterative T⁴ radiosity injection path.
-    let interior_lwr_method = hares_envelope::InteriorLwrMethod::StarMesh;
+    // iterative T⁴ radiosity injection path. The method arrives on the
+    // inputs: the production construction names StarMesh, the
+    // residual-attribution study's experimental construction names the
+    // variant it studies.
     let (rc, envelope_diagnostics) = assemble_building_rc(
         &boundary_inputs,
         n_zones,
@@ -2263,6 +2273,7 @@ mod tests {
                 overrides: None,
                 site_elevation_m: 0.0,
                 envelope_scales: &hares_input::EnvelopeScales::default(),
+                interior_lwr_method: hares_envelope::InteriorLwrMethod::StarMesh,
             },
         ) {
             Err(err) => err,
@@ -2336,6 +2347,7 @@ mod tests {
                 overrides: None,
                 site_elevation_m: 0.0,
                 envelope_scales: &hares_input::EnvelopeScales::default(),
+                interior_lwr_method: hares_envelope::InteriorLwrMethod::StarMesh,
             },
         ) {
             Err(err) => err,
