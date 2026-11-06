@@ -20,6 +20,7 @@ laws are enforced at runtime via invariant checks.
 | [Envelope parity](#envelope-oracle-tests) | Zone temperatures, thermal response | OCHRE simulator | `tests/*_oracle.rs` |
 | [Whole-building parity](#ochre-parity-tests) | End-to-end energy, power columns | OCHRE simulator | `tests/python/test_ochre_parity.py` |
 | [BESTEST](#bestest-ashrae-140) | Annual loads, peak temperatures | ASHRAE 140-2023 | `tests/bestest/` |
+| [A3 acceptance](#the-normative-a3-acceptance-mode) | The normative software acceptance criteria (single-value ranges, the two dates' hourly comparisons, the minimum-case rule) | ASHRAE 140-2023 Addendum a | `tests/bestest/a3/` |
 | [Conservation laws](#conservation-of-energy) | Energy balance, temperature bounds | First principles | `hares-envelope/tests/solver_energy_conservation.rs` |
 | [Runtime invariants](#runtime-invariants) | Per-timestep numerical sanity | First principles | `hares-core/src/invariants.rs` |
 
@@ -150,10 +151,10 @@ accompanying-files page, data.ashrae.org/standard140; the full copy
 hosted by the TRNSYS project has sha256
 ebebff90bba76ee4971eb40e32fc0cc22a858abb311000ea833dc1dfdcde510e),
 converted from the report's MWh to kWh. The standard's normative
-acceptance ranges (Normative Annex A3, "Software Acceptance Criteria",
-added by 140-2020 Addendum b) are UNVERIFIABLE-WEB until the standard's
-pages are supplied; until then these informative example-result bands
-are the pinned contract, and the upgrade path stays open.
+acceptance ranges (Normative Annex A3, "Software Acceptance Criteria")
+are their own pinned contract: the normative A3 mode below pins the
+public addendum's ranges, curves and minimum-case rule, and the two
+modes stay separate.
 
 The suite's weather is Denver TMY3, station 725650
 (`data/examples/USA_CO_Denver.epw`, "TMY3,725650" in the EPW header),
@@ -167,6 +168,85 @@ Reconciliation evidence: the engine's case 600 cooling drift baseline
 the current band (5,432–6,162) while outside the previously pinned
 140-2017 band (6,137–7,964). All nine previously pinned bands differed
 from the current edition's; none is shared.
+
+### The normative A3 acceptance mode
+
+Normative Annex A3 is the standard's own software acceptance surface,
+and it runs as its own explicitly selected comparison mode beside the
+B8 example bands above. Source: ANSI/ASHRAE/IBPSA Addendum a to
+ANSI/ASHRAE Standard 140-2023 (approved 2025-08-29), the public
+addendum PDF at
+[ashrae.org](https://www.ashrae.org/file%20library/technical%20resources/standards%20and%20guidelines/standards%20addenda/140_2023_a_20250829.pdf),
+sha256 `cb993847ccd4a50a10a09e27cbfc199536487490952d1438ee575e52a616e892`,
+verified before transcription. The addendum revises Normative Annex A3
+only; it touches neither Section 7's case definitions nor Annex B8.
+
+The pinned contract (in `tests/bestest/a3/`):
+
+- **Single-value ranges** (Tables A3-1 and A3-4, the addendum's
+  MWh/yr converted to kWh, both bounds inclusive per A3.1): Case 600
+  heating 3,750–4,980 kWh and cooling 5,000–6,830 kWh; Case 900
+  heating 1,040–2,280 kWh and cooling 2,350–2,600 kWh; and the
+  sensitivity rows (Case 610 - Case 600 through Case 995 - Case 985).
+- **Time-series ranges** (Tables A3-2, A3-3, A3-5, A3-6): the
+  February 1 and July 14 hourly zone loads compared to the
+  representative curves by the Pearson correlation coefficient (curve
+  shape) above 0.879 and the root mean square error (value scaling,
+  kWh) below the per-case limit. The hour labels are hour-ending
+  (Hour 1 is midnight to 01:00 local standard time).
+- **The minimum-case rule** (Table A3-14, per A3.2): the Thermal
+  Fabric Low Mass group passes when at least 30 of its 34 range cases
+  are within range, the Thermal Fabric High Mass group at least 25 of
+  28. A submission missing range-case results refuses: no conformance
+  claim is issued from a partial run, whatever the evaluated results
+  did.
+
+The record run (`cargo test --test bestest
+annex_a3_section7_group_verdicts_are_records -- --nocapture`) prints
+every range case with its value and verdict. The verdicts are records,
+never tuning targets: an A3 failure is a finding with numbers, and no
+B8 result substitutes for an A3 one or vice versa.
+
+The 2026-11-05 record (the corrected 60/40 gains-split case fixtures;
+HARES carries annual fixtures for 600, 640, 650, 900, 920, 950, so
+each group's submission is incomplete and both REFUSE conformance):
+
+| Group | Range cases | Evaluated | Within | Disposition |
+|-------|------------|-----------|--------|-------------|
+| Thermal Fabric Low Mass | 34 (minimum 30) | 8 | 8 | REFUSED (26 without a result) |
+| Thermal Fabric High Mass | 28 (minimum 25) | 7 | 6 | REFUSED (21 without a result) |
+
+Every evaluated range case is WITHIN its range except one:
+
+- **Case 900, July 14 hourly loads: OUTSIDE.** Pearson 0.9630 (above
+  the 0.879 floor) but RMSE 0.1516 kWh against the limit 0.0967 kWh:
+  the shape tracks, the value scaling misses by 1.57x the limit. The
+  finding stands as recorded.
+
+The within-range record, with the B8 example bands beside them:
+
+| Range case | HARES value | A3 range | B8 example band |
+|------------|-------------|----------|-----------------|
+| Case 600 heating | +4,033.912 kWh | [3,750, 4,980] | [3,993, 4,504] |
+| Case 600 cooling | +5,411.481 kWh | [5,000, 6,830] | [5,432, 6,162] (20.5 under the floor, drift-locked) |
+| Case 640 - Case 600 heating | -1,490.222 kWh | [-2,170, -1,220] | - |
+| Case 640 - Case 600 cooling | -176.067 kWh | [-560, 30] | - |
+| Case 650 - Case 600 cooling | -950.963 kWh | [-1,540, -950] | - |
+| Case 900 heating | +1,342.638 kWh | [1,040, 2,280] | [1,379, 1,814] (36.4 under the floor, drift-locked) |
+| Case 900 cooling | +2,414.284 kWh | [2,350, 2,600] | [2,267, 2,714] |
+| Case 920 - Case 900 heating | +1,875.396 kWh | [1,510, 1,920] | - |
+| Case 920 - Case 900 cooling | +281.819 kWh | [80, 480] | - |
+| Case 950 - Case 900 cooling | -1,784.887 kWh | [-2,000, -1,560] | - |
+| Case 600 February 1 | r 0.9885, RMSE 0.4037 kWh | r > 0.879, RMSE < 0.4194 | - |
+| Case 600 July 14 | r 0.9880, RMSE 0.1592 kWh | r > 0.879, RMSE < 0.1921 | - |
+| Case 640 February 1 | r 0.9890, RMSE 0.3259 kWh | r > 0.879, RMSE < 0.6559 | - |
+| Case 900 February 1 | r 0.9919, RMSE 0.1059 kWh | r > 0.879, RMSE < 0.3716 | - |
+| Case 900 July 14 | r 0.9630, RMSE 0.1516 kWh | r > 0.879, RMSE < 0.0967 | OUTSIDE |
+
+The Section 7 cases without annual fixtures (610, 620, 630, 660, 670,
+680, 685, 695, 910, 930, 940, 960, 980, 985, 995) are the named open
+surface: adding them is the path to a complete submission, and the
+refusal pins stay honest until then.
 
 ### Running BESTEST
 
@@ -300,6 +380,7 @@ Different validation layers use different tolerance strategies:
 | Standard / Source | How it is used |
 |-------------------|----------------|
 | ASHRAE 140-2023 | BESTEST reference bands for envelope validation |
+| ASHRAE 140-2023 Addendum a (2025-08-29, sha256 cb993847ccd4a50a10a09e27cbfc199536487490952d1438ee575e52a616e892) | The Normative Annex A3 software acceptance criteria: single-value ranges, the February 1 and July 14 representative curves and limits, the minimum-case rule |
 | ASHRAE HOF 2021 Ch. 1 | Psychrometric equations, saturation pressure |
 | ASHRAE HOF 2021 Ch. 16 | Infiltration (AIM-2 wind-stack model) |
 | ASHRAE HOF 2021 Ch. 4 | Natural convection (TARP h formula) |

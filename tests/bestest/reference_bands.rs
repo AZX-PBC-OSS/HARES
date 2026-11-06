@@ -20,10 +20,15 @@
 //! 140-2020 beyond folder and file names, section numbering and headers.
 //!
 //! The standard's normative acceptance ranges (Normative Annex A3,
-//! "Software Acceptance Criteria", added by 140-2020 Addendum b) are
-//! UNVERIFIABLE-WEB until the standard's pages are supplied. Until then
-//! these informative Annex B8 example-result bands are the pinned
-//! contract, and the upgrade path (pinning the A3 ranges) stays open.
+//! "Software Acceptance Criteria") are their own pinned contract now:
+//! 140-2023 Addendum a (approved 2025-08-29) revised Annex A3, and the
+//! public addendum PDF's single-value ranges, the February 1 and July
+//! 14 representative curves and limits, and the minimum-case rule are
+//! pinned with the PDF's sha256 in `super::a3` (`tests/bestest/a3/`),
+//! the A3 harness beside this B8 machinery. Those normative ranges and
+//! these informative example bands are separate modes: selecting the A3
+//! contract never rewrites, widens or replaces these B8 bands, and the
+//! A3 verdicts never substitute for a B8 result or vice versa.
 //!
 //! The bands are the target, not the tests' whole pass condition:
 //! out-of-band metrics are drift-locked at measured baselines
