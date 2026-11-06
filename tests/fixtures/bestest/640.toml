@@ -3,12 +3,13 @@ building_id = 640
 internal_gains_w = 200.0
 internal_gains_constant = true
 internal_gains_sensible_fraction = 1.0
-# The radiant split is the family's 0.3: the I/O Reference's generic
-# OtherEquipment example, not a BESTEST case value. ASHRAE 140-2017 Addendum a
-# Section 5.2.1.7 specifies 200 W, 100% sensible, 60% radiative, 40%
-# convective; 920.toml's note gives the reason the 0.3 stays until the
-# family-wide correction (a Tier-1 physics re-pin).
-internal_gains_radiant_fraction = 0.3
+# The gains' radiant split is the standard's case-input value: ASHRAE
+# 140-2017 Addendum a Section 5.2.1.7 (the clause 140-2023 Section 7's
+# fabric specification carries) declares the 200 W load 100% sensible,
+# 60% radiative, 40% convective. The eight gains-bearing case fixtures
+# share the one value; the record is docs/PHYSICS_DECISIONS.md, "The
+# BESTEST internal-gain radiant fraction is the standard's case input".
+internal_gains_radiant_fraction = 0.6
 
 # The warm-up: the [simulation] table's warmup field, the default
 # converging warm-up (the EnergyPlus criteria).

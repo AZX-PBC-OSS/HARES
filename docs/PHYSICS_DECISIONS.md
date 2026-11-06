@@ -2635,3 +2635,68 @@ same double-counting reason and because the OA's flow would then need
 its own envelope path anyway. The OA's latent load is not modeled: the
 dry-bulb form's credit is sensible-only, and the humid lockout bounds
 the case where that omission would matter.
+
+## The BESTEST internal-gain radiant fraction is the standard's case input
+
+The eight gains-bearing BESTEST case fixtures (600, 600FF, 640, 650,
+900, 900FF, 920, 950) declare `internal_gains_radiant_fraction = 0.6`:
+the internal gains are 200 W, 100% sensible, 60% radiative and 40%
+convective. The source is the standard's own clause, ASHRAE 140-2017
+Addendum a Section 5.2.1.7, carried by 140-2023 Section 7's fabric
+specification, whose informative note names the load "equipment,
+lights, people, etc.". The entry records the CASE INPUT contract for
+the BESTEST cases, not a universal equipment default: the engine's
+defaults and every non-BESTEST dwelling keep their own gains
+conventions (the HPXML resolvers' per-load radiant splits, the
+occupant schedule's 70/30 sensible split), and nothing outside the
+eight fixtures reads this value.
+
+The contest, adjudicated. The fixtures previously declared 0.3 and
+the in-repo surfaces attributed it to EnergyPlus: a unit test
+asserting "the EnergyPlus BESTEST authoritative value" (now
+`bestest_600_internal_gains_radiant_fraction_matches_ashrae_140`), the
+Case 600 and 900FF test comments' "per EnergyPlus BESTEST IDF
+specification", the 900FF root-cause test's attribution of its
+measured −0.295 °C delta to the 0.3 split (the measurement is the
+standard's 60/40 split's, and the test now computes that split), the
+thermal-pathway port test's "30/70 split, BESTEST 900/600" comment
+(now an explicitly arbitrary wiring split), and the OCHRE runner's
+gains comment (reconciling that comment is the OCHRE comparison's own
+work). The 0.3 is the I/O
+Reference's generic OtherEquipment example value (the IDD's
+`Fraction Radiant` field default is 0), never the BESTEST case value.
+The EnergyPlus-artifact question closes with the official reference
+fetched: NREL's BESTEST-GSR reference implementation (now
+NatLabRockies/BESTEST-GSR), which generates the EnergyPlus BESTEST
+models, defines the gains as the `OS:OtherEquipment:Definition` object
+"ZONE ONE OthEq 1 Definition": Design Level 200 W, Fraction Latent 0,
+Fraction Radiant 0.6, Fraction Lost 0
+(`shared_resources/bestest_resources.osm`). The official E+-based
+BESTEST reference runs the 60/40 split; the claimed "E+ v9.6 BESTEST
+IDF overrides to 0.3" is refuted by the artifact (the EnergyPlus
+repository itself carries no BESTEST IDF under `testfiles/`, verified
+by listing its contents). The rejected alternative is the
+occupant-convention reading plus the claimed EnergyPlus BESTEST IDF
+0.3 override.
+
+Measured direction of the delta (each of the ten annual cases run at
+both commits, the parent c90f5f46 and the tip; the engine is untouched,
+so every movement is the split's): 600 heating 3962.481116 to
+4033.911883 kWh (enters its band), 600 cooling 5466.121835 to
+5411.481456 kWh (leaves its band, 20.5 below the floor: the one
+worsened residual), 640 heating energy 2489.196688 to 2543.689729 kWh,
+650 cooling 4515.286511 to 4460.518595 kWh, 900 heating 1308.992884 to
+1342.637964 kWh (still below its floor; the deficit halves from 70.0),
+900 cooling 2406.477181 to 2414.283991 kWh, 920 heating 3167.274253 to
+3218.034154 kWh, 920 cooling 2676.002725 to 2696.103031 kWh, 950
+cooling 648.128364 to 629.396857 kWh, 600FF peak 70.353152 to
+70.248155 C (still 1.85 K over its ceiling), 900FF peak 45.637798 to
+45.528453 C, 900FF min 2.487962 to 2.379882 C (still 0.18 K over its
+ceiling); the zero-gain in-depth controls 195 and 395 are bitwise
+unchanged at both commits. The closure hypothesis that the corrected
+split closes the family's out-of-band residuals is killed: 600
+heating's residual closes, 900 heating's and 900FF minimum's improve
+and remain out, 600FF's peak remains out, and 600 cooling's residual
+is new and worse. The correction stands because the case inputs are
+the standard's; the remaining residuals are the residual-attribution
+study's starting state, and no band moved.

@@ -149,33 +149,56 @@ fn run_single_case(case: &BestestCase) {
 /// row carries: the star-mesh interior LWR form (OCHRE/TRNSYS/ESP-r's)
 /// against the E+ MRT form, and the Kusuda-Achenbach ground mean against
 /// the BESTEST's constant.
+/// Re-measured 2026-11-05 (the gains case-input correction: the eight
+/// BESTEST case fixtures' internal-gain radiant fraction moves 0.3 to 0.6,
+/// the ASHRAE 140-2017 Addendum a Section 5.2.1.7 case value; the engine is
+/// untouched and every movement below is the split's, each case run at both
+/// commits). 600 heating 3962.481116 → 4033.911883 (IN BAND, baseline
+/// withdrawn), 600 cooling 5466.121835 → 5411.481456 (was IN BAND, now
+/// 20.5 kWh below its 5432 floor: the one worsened residual, pinned on its
+/// new baseline with the closure-hypothesis kill the record carries), 640
+/// heating energy 2489.196688 → 2543.689729 (in band), 650 cooling
+/// 4515.286511 → 4460.518595 (in band), 900 heating 1308.992884 →
+/// 1342.637964 (still out; the deficit halves, −70.0 → −36.4 below the
+/// floor), 900 cooling 2406.477181 → 2414.283991 (in band), 600FF peak
+/// 70.353152 → 70.248155 (still out, 1.85 K over), 600FF min −11.898906 →
+/// −12.002474 (in band), 900FF peak 45.637798 → 45.528453 (in band), 900FF
+/// min 2.487962 → 2.379882 (still out, 0.18 K over), 920 heating
+/// 3167.274253 → 3218.034154 and cooling 2676.002725 → 2696.103031 (in
+/// band), 950 cooling 648.128364 → 629.396857 (in band). The no-change
+/// controls are bitwise at both commits: 195 heating 3979.967248 and
+/// cooling 601.819095, 395 heating 4385.626148 and cooling 11.988883.
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3962.5 vs band 3993–4504; the cooling load landed
-        // in its band (5469.3 in [5432, 6162]) with the controller's hold.
-        ("600", AnnualHeatingLoadKwh) => 3962.481116,
-        // 640: heating energy IN BAND (2485.5 in [2403, 2682]) with the
-        // controller's hold; no baseline.
+        // 600: heating IN BAND (4033.9 in [3993, 4504]) since the gains'
+        // radiant split moved to the standard's 0.6; baseline withdrawn.
+        // Cooling: 5411.5 vs band 5432–6162, 20.5 under the floor: it was
+        // in band at the parent and the split moved it below, the one
+        // worsened residual the re-measure above records.
+        ("600", AnnualCoolingLoadKwh) => 5411.481456,
+        // 640: heating energy IN BAND (2543.7 in [2403, 2682]); no baseline.
         // 395: heating 4385.6 vs band 4565–5145 (4.0 % under the floor;
-        // cooling 12.3 in [4, 21]). The 195 twin (the same envelope at
-        // emittance 0.1) lands in band on the same physics; the 395's
-        // emittance-0.9 row carries the modeling-choice aggregate the
-        // function doc names.
+        // cooling 11.99 in [4, 21]; both bitwise at the parent: the in-depth
+        // pair is the gains family's zero-gain control). The 195 twin (the
+        // same envelope at emittance 0.1) lands in band on the same physics;
+        // the 395's emittance-0.9 row carries the modeling-choice aggregate
+        // the function doc names.
         ("395", AnnualHeatingLoadKwh) => 4385.626148,
-        // 900: heating 1309.0 vs band 1379–1814. The slab's seasonal
+        // 900: heating 1342.6 vs band 1379–1814 (2.5 % under the floor; the
+        // split halved the deficit from 70.0). The slab's seasonal
         // memory is the reduction's diurnal-band fit residual (the fit
         // serves the diurnal period the ISO witness pins; the exceedance
         // counter is zero on these assemblies), the envelope-numerics
         // row's neighbor.
-        ("900", AnnualHeatingLoadKwh) => 1308.992884,
+        ("900", AnnualHeatingLoadKwh) => 1342.637964,
         // 600FF: peak vs band 62.4–68.4 (min in band: strict). The
         // ceiling's enhanced film bleeds the free-float peak toward the
-        // attic: 70.35, 2.0 K over.
-        ("600FF", PeakZoneTempC) => 70.353152,
-        // 900FF: peak IN BAND (45.66 in [43.3, 46.0]); min vs 0.6–2.2 at
-        // 2.49.
-        ("900FF", MinZoneTempC) => 2.487962,
+        // attic: 70.25, 1.85 K over.
+        ("600FF", PeakZoneTempC) => 70.248155,
+        // 900FF: peak IN BAND (45.53 in [43.3, 46.0]); min vs 0.6–2.2 at
+        // 2.38 (0.18 over; the split moved it from 2.49).
+        ("900FF", MinZoneTempC) => 2.379882,
         _ => return None,
     })
 }
@@ -195,11 +218,12 @@ fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
 //
 // Root-cause fixes applied (T-0301): free-float initialization uses outdoor
 // temperature (not 21°C default) when HVAC setpoints are absent; internal gains
-// use 30% radiant fraction per EnergyPlus BESTEST IDF specification.
+// use the standard's radiant fraction (ASHRAE 140-2017 Addendum a Section
+// 5.2.1.7: the 200 W gains are 60% radiative, 40% convective).
 // T-0352 corrected a TOML parse bug: internal_gains_radiant_fraction was silently
 // dropped because the keys appeared after a [section] header and were absorbed
 // into that section's table. The radiant fraction is now correctly parsed and
-// applied — 200 W × 0.3 = 60 W radiant to surfaces, 140 W convective to zone air.
+// applied: 200 W × 0.6 = 120 W radiant to surfaces, 80 W convective to zone air.
 // IGNORED at the 140-2017 pins: annual_heating=3205 vs band [4296,5709]
 // kWh (below) and annual_cooling=5892 vs band [6137,7964] kWh (below).
 // Additional physics fixes
@@ -278,11 +302,12 @@ fn bestest_case_600ff() {
 // temperature [0.6, 2.2]°C (ASHRAE 140-2023 Annex B8 Table B8-5). ASHRAE 140
 // bands are published oracles and must NOT be widened.
 // Root-cause fixes applied (T-0301): free-float init now uses outdoor temp
-// and internal gains use 30% radiant fraction.  T-0352 corrected a TOML parse
-// bug that silently dropped the radiant fraction before T-0301's fix could take
-// effect.  However, the 21-day warmup already washes out initial-condition
-// effects, and the radiant fraction alone is insufficient to restore
-// min_zone_temp into the ASHRAE band.
+// and internal gains use the standard's radiant fraction (ASHRAE 140-2017
+// Addendum a Section 5.2.1.7: 60% radiative, 40% convective).  T-0352
+// corrected a TOML parse bug that silently dropped the radiant fraction
+// before T-0301's fix could take effect.  However, the 21-day warmup already
+// washes out initial-condition effects, and the radiant fraction alone is
+// insufficient to restore min_zone_temp into the ASHRAE band.
 // IGNORED at the 140-2017 pins: peak_zone_temp=46.2 vs band
 // [41.6,44.8]°C (above) and min_zone_temp=3.37 vs band [-6.4,-1.6]°C
 // (above). Additional physics fixes
@@ -329,12 +354,16 @@ fn bestest_case_640() {
 // the_equipment`), the ideal controller holding the declared bound
 // (`ideal_controller_holds_the_declared_heating_bound`), and the interior
 // film's frozen regime keyed on the tilt's geometry. Cases 195 (heating
-// 3974.9, cooling 601.9), 920 (heating 3162.8, cooling 2678.6) and 395's
-// cooling (12.3) land in band. Case 395's heating runs 4385.6 against the
+// 3979.967248, cooling 601.819095), 920 (heating 3218.034154, cooling
+// 2696.103031) and 395's cooling (11.988883) land in band. Case 395's
+// heating runs 4385.626148 against the
 // floor 4565 (4.0 percent under, the signed distance prints on every run)
 // on a drift lock: the modeling-choice aggregate (the star-mesh interior
 // LWR form against E+'s MRT form, and the Kusuda-Achenbach ground mean)
-// whose disposition is the operator's. No band widened.
+// whose disposition is the operator's. The 195 and 395 figures are bitwise
+// the parent's (the pair is the gains family's zero-gain control; the
+// figures the block printed before the 2026-11-05 re-measure predate the
+// economizer's landing). No band widened.
 
 /// The synthetic fixture's declared thermostat pair reaches the equipment
 /// verbatim. ASHRAE 140's in-depth cases pin their thermostat as part of the
@@ -541,6 +570,72 @@ fn in_depth_fixtures_carry_the_standards_ir_emittance() {
                 surface.emissivity
             );
         }
+    }
+}
+
+/// The BESTEST gains family's case-input contract: ASHRAE 140-2017
+/// Addendum a Section 5.2.1.7 (the clause 140-2023 Section 7's fabric
+/// specification carries) declares the internal gains 200 W, 100% sensible,
+/// 60% radiative and 40% convective, and every gains-bearing case fixture
+/// declares that 0.6 radiant fraction. The test enumerates exactly the eight
+/// gains-bearing fixtures and proves the parse path reaches each declared
+/// value: one step of the assembled dwelling emits the split through the
+/// fixture-to-HPXML-to-port chain (`internal_gains_radiant_fraction` ->
+/// `FracRadiant` -> the plug load's gain fractions -> the port's
+/// `radiant_gain_w`). The ideal HVAC's port carries `radiant_gain_w: 0.0`,
+/// so the port's radiant total is the gains' share alone, and the ratio
+/// against the internal-gain category total is the declared fraction
+/// exactly. The schedule's flat hourly row reads 0.04167 (200.008 W over
+/// the day's 24 rows), so the watts carry the same 1 W allowance the
+/// no-occupancy pin below uses.
+#[test]
+fn bestest_gains_fixtures_carry_the_standards_sixty_forty_split() {
+    const GAINS_FAMILY: [&str; 8] = ["600", "600FF", "640", "650", "900", "900FF", "920", "950"];
+    let registry: Vec<_> = core_cases().into_iter().chain(extended_cases()).collect();
+    let family: Vec<_> = GAINS_FAMILY
+        .iter()
+        .map(|id| {
+            registry
+                .iter()
+                .find(|c| c.id == *id)
+                .unwrap_or_else(|| panic!("case {id} is in the BESTEST case registry"))
+        })
+        .collect();
+    assert_eq!(
+        family.len(),
+        GAINS_FAMILY.len(),
+        "the gains family enumerates exactly the eight gains-bearing fixtures"
+    );
+    for case in family {
+        let mut dwelling =
+            Dwelling::from_toml_config_with_reports(&case.fixture_path(), Some(Vec::new()))
+                .unwrap_or_else(|err| panic!("case {} builds: {err}", case.id));
+        dwelling
+            .step()
+            .unwrap_or_else(|err| panic!("case {} steps: {err}", case.id));
+        let gains = dwelling.thermal_solver().component_gains();
+        assert!(
+            gains.internal_gain_w > 0.0,
+            "case {}: the declared 200 W gains reach the first step",
+            case.id
+        );
+        let emitted_fraction = gains.port_radiant_w / gains.internal_gain_w;
+        assert!(
+            (emitted_fraction - 0.6).abs() < 1e-9,
+            "case {}: ASHRAE 140-2017 Addendum a Section 5.2.1.7's internal gains \
+             are 60% radiative; the fixture's emitted radiant fraction is \
+             {emitted_fraction} ({} W of {} W)",
+            case.id,
+            gains.port_radiant_w,
+            gains.internal_gain_w
+        );
+        assert!(
+            (gains.port_radiant_w - 120.0).abs() <= 1.0,
+            "case {}: the declared 200 W at 60% radiative emits 120 W radiant; \
+             the port carries {} W",
+            case.id,
+            gains.port_radiant_w
+        );
     }
 }
 

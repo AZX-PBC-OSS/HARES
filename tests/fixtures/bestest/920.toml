@@ -3,18 +3,16 @@ building_id = 920
 internal_gains_w = 200.0
 internal_gains_constant = true
 internal_gains_sensible_fraction = 1.0
-# The gains' radiative split matches Case 900's fixture treatment: Case 920's
+# The gains' radiative split is the standard's case-input value: Case 920's
 # differential against Case 900 (the standard's east/west transmittance pair)
-# requires the pair's internal gains to match. The standard's own clause
+# requires the pair's internal gains to match, and the standard's own clause
 # (140-2017 Addendum a Section 5.2.1.7) specifies the 200 W load "100%
-# sensible, 60% radiative, 40% convective", and EnergyPlus's official BESTEST
-# report describes its runs the same way; the 0.3 below is the I/O Reference's
-# generic OtherEquipment example, not a BESTEST case value. The 0.3 is shared
-# by the 600/600FF/640/900/900FF/920 fixtures (620 carries no gains) and is an
-# open fixture-provenance finding against the family's gains treatment: a
-# family-wide correction moves the annual loads and re-pins the bands, the
-# Tier-1 physics lane's work.
-internal_gains_radiant_fraction = 0.3
+# sensible, 60% radiative, 40% convective". The 0.6 is shared by the eight
+# gains-bearing fixtures (600/600FF/640/650/900/900FF/920/950; 620 carries no
+# gains); the record adjudicating the generic OtherEquipment example against
+# the clause is docs/PHYSICS_DECISIONS.md, "The BESTEST internal-gain radiant
+# fraction is the standard's case input".
+internal_gains_radiant_fraction = 0.6
 
 # The warm-up: the [simulation] table's warmup field, the default
 # converging warm-up (the EnergyPlus criteria).

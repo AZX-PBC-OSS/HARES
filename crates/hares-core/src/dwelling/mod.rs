@@ -15630,16 +15630,20 @@ occupancy = 1.0
     }
 
     /// Parse 600.toml fixture and verify the internal gains radiative fraction
-    /// matches the EnergyPlus BESTEST authoritative value.
+    /// matches the standard's case value.
     ///
-    /// EnergyPlus BESTEST IDF OtherEquipment Fraction Radiant = 0.3 (30% radiant,
-    /// 70% convective). Source: E+ I/O Reference §Group-InternalGains,
-    /// OtherEquipment object; E+ IDD V9-6-0-Energy+.idd N5 field default=0 but
-    /// BESTEST IDF overrides to 0.3. This matches E+ v9.6 BESTEST test reference
-    /// value. The 60% figure refers to occupant sensible gain conventions,
-    /// not to `OtherEquipment`.
+    /// ASHRAE 140-2017 Addendum a Section 5.2.1.7 (the clause 140-2023
+    /// Section 7's fabric specification carries) declares the BESTEST
+    /// internal-gain load 200 W, 100% sensible, 60% radiative, 40%
+    /// convective. The informative note names the load "equipment, lights,
+    /// people, etc.", so the 60% figure is the standard's case-input contract
+    /// and not an occupant-gain convention. The former 0.3 pin read the I/O
+    /// Reference's generic OtherEquipment example (the IDD's Fraction Radiant
+    /// default is 0) as the BESTEST case value; the adjudication is
+    /// docs/PHYSICS_DECISIONS.md, "The BESTEST internal-gain radiant fraction
+    /// is the standard's case input".
     #[test]
-    fn bestest_600_internal_gains_radiant_fraction_matches_energyplus() {
+    fn bestest_600_internal_gains_radiant_fraction_matches_ashrae_140() {
         let base_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/bestest/600.toml");
         let toml_str = fs::read_to_string(&base_path).expect("read 600.toml");
@@ -15666,8 +15670,10 @@ occupancy = 1.0
             "600.toml sensible_fraction = {sensible_frac}, expected 1.0 (all-sensible BESTEST gains)"
         );
         assert!(
-            (radiant_frac - 0.3).abs() < 1e-9,
-            "600.toml radiant_fraction = {radiant_frac}, expected 0.3 (E+ BESTEST IDF FractionRadiant)"
+            (radiant_frac - 0.6).abs() < 1e-9,
+            "600.toml radiant_fraction = {radiant_frac}, expected 0.6 (ASHRAE 140-2017 \
+             Addendum a Section 5.2.1.7: the 200 W gains are 60% radiative, 40% \
+             convective)"
         );
     }
 
