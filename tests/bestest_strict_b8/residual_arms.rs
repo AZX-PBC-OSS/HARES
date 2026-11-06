@@ -314,8 +314,12 @@ fn run_arm(case: &BestestCase, method: InteriorLwrMethod) -> (ArmRecord, Resolve
                 let &(area, emissivity) = &lwr_surface_factors[i];
                 let (t_surf, q_exact) = (diag.surface_temp_c, diag.lwr_flux_w);
                 let g = hares_physics::constants::linearised_h_rad(emissivity, T_REF_K) * area;
+                // The flux INTO the surface, the sign `lwr_flux_w` carries:
+                // positive when the star node is warmer than the surface.
+                // The repo's linearised form uses the same convention
+                // (`interior_longwave_linearised_w`: T_mrt - T_surf).
                 let q_linear = if total_g > 0.0 {
-                    g * (t_surf - total_gt / total_g)
+                    g * (total_gt / total_g - t_surf)
                 } else {
                     0.0
                 };
