@@ -2652,12 +2652,17 @@ occupant schedule's 70/30 sensible split), and nothing outside the
 eight fixtures reads this value.
 
 The contest, adjudicated. The fixtures previously declared 0.3 and
-three in-repo surfaces attributed it to EnergyPlus: a unit test
+the in-repo surfaces attributed it to EnergyPlus: a unit test
 asserting "the EnergyPlus BESTEST authoritative value" (now
 `bestest_600_internal_gains_radiant_fraction_matches_ashrae_140`), the
 Case 600 and 900FF test comments' "per EnergyPlus BESTEST IDF
-specification", and the OCHRE runner's gains comment (reconciling that
-comment is the OCHRE comparison's own work). The 0.3 is the I/O
+specification", the 900FF root-cause test's attribution of its
+measured −0.295 °C delta to the 0.3 split (the measurement is the
+standard's 60/40 split's, and the test now computes that split), the
+thermal-pathway port test's "30/70 split, BESTEST 900/600" comment
+(now an explicitly arbitrary wiring split), and the OCHRE runner's
+gains comment (reconciling that comment is the OCHRE comparison's own
+work). The 0.3 is the I/O
 Reference's generic OtherEquipment example value (the IDD's
 `Fraction Radiant` field default is 0), never the BESTEST case value.
 The EnergyPlus-artifact question closes with the official reference

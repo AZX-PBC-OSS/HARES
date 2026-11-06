@@ -435,8 +435,9 @@ fn rc_network_exposes_ground_column() {
 ///
 /// Setup: single-zone model (3 inputs: outdoor, surface, zone-air), one opaque
 /// interior surface with `radiation_frac = 1.0` (all radiant gain routed to
-/// surface RC node).  A port carries 700 W convective + 300 W radiant (30/70
-/// split matching the EnergyPlus BESTEST IDF OtherEquipment Fraction Radiant = 0.3).
+/// surface RC node).  A port carries 700 W convective + 300 W radiant (an
+/// arbitrary 30/70 split that exercises the radiant air residual; the BESTEST
+/// case input is 0.6, docs/PHYSICS_DECISIONS.md).
 ///
 /// The production path calls both `apply_port_convective_inputs` and
 /// `apply_port_radiant_inputs`.  `zone_sensible_breakdown_debug` currently
@@ -565,7 +566,8 @@ fn one_surface_solver(
 fn zone_sensible_breakdown_debug_must_include_radiant_air_residual() {
     let (mut solver, env, surface, _) = one_surface_solver(InteriorMode::ScriptF);
 
-    // Port: 700 W convective + 300 W radiant (30/70 split, BESTEST 900/600)
+    // Port: 700 W convective + 300 W radiant (an arbitrary 30/70 split that
+    // exercises the wiring; the BESTEST case input is 0.6).
     // + 100 W short-wave.
     let convective_w = 700.0_f64;
     let radiant_w = 300.0_f64;

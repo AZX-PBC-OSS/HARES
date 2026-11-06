@@ -11,11 +11,11 @@
 //!      free-float building with no HVAC — concrete walls start unrealistically
 //!      warm. Measured impact: −4.53 °C (21 °C→0 °C proxy); warmup-appropriate
 //!      initialization (≈3 °C) accounts for ~2.4 °C of the 2.50 °C outlier.
-//!   2. Internal gains 100 % convective, corrected to a radiant split; the
-//!      fixtures then carried the 0.3 radiant value (the I/O Reference's
-//!      generic OtherEquipment example; the standard's case input is 0.6,
-//!      docs/PHYSICS_DECISIONS.md). Measured impact of the 0.3 split:
-//!      −0.295 °C.
+//!   2. Internal gains 100 % convective, corrected to the standard's case
+//!      split of 60 % radiant and 40 % convective (docs/PHYSICS_DECISIONS.md;
+//!      the fixtures carried the I/O Reference's generic 0.3 example before
+//!      this correction). Measured impact of the 60 % split: −0.295 °C
+//!      (docs/bestest-900ff-root-cause-analysis.md, H2).
 //!      Note (T-0352): the radiant fraction was silently dropped by a TOML
 //!      parse bug in the BESTEST fixtures — the keys appeared after a [section]
 //!      header and were absorbed into that section's table, so
@@ -387,42 +387,41 @@ fn free_float_initialization_corrects_concrete_overshoot() {
 // Root cause confirmation: internal-gains radiant-fraction impact (TMULT)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Verifies the quantitative impact of the internal-gains 70/30
-/// convective/radiant split on zone heat balance.
+/// Verifies the quantitative impact of the internal-gains 60/40
+/// radiant/convective split on zone heat balance.
 ///
-/// Before the fix, internal gains were 100 % convective — all 200 W injected
-/// directly into zone air.  The fixtures then carried the 0.3 radiant value
-/// (the I/O Reference's generic OtherEquipment example; the standard's case
-/// input is 0.6, docs/PHYSICS_DECISIONS.md): 60 W radiant distributed to
-/// interior surfaces via TMULT weighting, 140 W convective directly to zone
+/// Before the fix, internal gains were 100 % convective: all 200 W injected
+/// directly into zone air.  The standard's case input is 60 % radiant and
+/// 40 % convective (docs/PHYSICS_DECISIONS.md): 120 W radiant distributed to
+/// interior surfaces via TMULT weighting, 80 W convective directly to zone
 /// air.  The measured impact of that split on 900FF minimum zone temperature
-/// is −0.295 °C.
+/// is −0.295 °C (docs/bestest-900ff-root-cause-analysis.md, H2).
 ///
 /// At winter minimum (cold night, T_zone ≈ −1.6 °C per ASHRAE 140 upper
 /// bound), interior surfaces are warmer than zone air.  Radiant gains to
 /// surfaces warm them further, reducing the ΔT between air and surfaces and
 /// thus reducing convective heat loss from air to surfaces.  The convective
-/// portion (140 W instead of 200 W) directly warms zone air less than the old
+/// portion (80 W instead of 200 W) directly warms zone air less than the old
 /// 100 %-convective assumption.  Both effects combine to lower peak winter
-/// zone temperature — the correct behaviour.
+/// zone temperature, the correct behaviour.
 #[test]
 fn internal_gains_radiant_fraction_reduces_convective_heat_to_zone_air() {
     let total_gain_w = 200.0;
-    let radiant_frac = 0.3;
+    let radiant_frac = 0.6;
 
     let radiant_w: f64 = total_gain_w * radiant_frac;
     let convective_w: f64 = total_gain_w * (1.0 - radiant_frac);
 
-    // The 30 % radiant split was the fixtures' value when the impact was
-    // measured; the case input is the standard's 0.6
-    // (docs/PHYSICS_DECISIONS.md).
+    // The 60 % radiant split is the standard's case input
+    // (docs/PHYSICS_DECISIONS.md); the measured −0.295 °C is this split's
+    // impact (docs/bestest-900ff-root-cause-analysis.md, H2).
     assert!(
-        (radiant_w - 60.0).abs() < 1e-9,
-        "30 % of 200 W = 60 W radiant, got {radiant_w}"
+        (radiant_w - 120.0).abs() < 1e-9,
+        "60 % of 200 W = 120 W radiant, got {radiant_w}"
     );
     assert!(
-        (convective_w - 140.0).abs() < 1e-9,
-        "70 % of 200 W = 140 W convective, got {convective_w}"
+        (convective_w - 80.0).abs() < 1e-9,
+        "40 % of 200 W = 80 W convective, got {convective_w}"
     );
 
     // The radiant gain must be non-negative and not exceed total sensible.
@@ -432,17 +431,15 @@ fn internal_gains_radiant_fraction_reduces_convective_heat_to_zone_air() {
 
     // The measured impact of −0.295 °C (see file header) implies that at the
     // winter minimum, every reduction in convective heating of zone air
-    // directly lowers zone temperature.  The 200 W vs 140 W convective
-    // difference (60 W less) — when distributed across the ~4 walls, roof, and
-    // floor with a combined UA ≈ 200 W/K — would produce approximately
-    // ΔT ≈ 60 / 200 ≈ 0.3 °C, consistent with the measured −0.295 °C.
+    // directly lowers zone temperature.  The 200 W vs 80 W convective
+    // difference (120 W less) across the envelope is the scale of that
+    // effect; the measured −0.295 °C is the reference value
+    // (docs/bestest-900ff-root-cause-analysis.md, H2).
     //
-    // Compute UA from 900FF boundary conductances to verify the back-of-envelope.
+    // Compute the wall conductance series as the back-of-envelope scale.
     let wall_conductance_series: f64 =
         4.0 * 63.6 /* m² */ / (0.009 / 0.140 + 0.0615 / 0.040 + 0.100 / 0.510);
-    // The exact UA values aren't critical here: the split math is the
-    // physics fact.  The split is the standard's case input (the fixtures'
-    // 0.3 when this impact was measured, the standard's 0.6 since), not a
-    // tunable parameter.
+    // The exact UA is approximate; the measured delta is the reference. The
+    // split is the standard's case input, not a tunable parameter.
     let _ = wall_conductance_series;
 }
