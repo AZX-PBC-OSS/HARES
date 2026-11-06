@@ -207,7 +207,7 @@ every range case with its value and verdict. The verdicts are records,
 never tuning targets: an A3 failure is a finding with numbers, and no
 B8 result substitutes for an A3 one or vice versa.
 
-The 2026-11-05 record (the post-P1 case fixtures, 60/40 gains split;
+The 2026-11-05 record (the corrected 60/40 gains-split case fixtures;
 HARES carries annual fixtures for 600, 640, 650, 900, 920, 950, so
 each group's submission is incomplete and both REFUSE conformance):
 
