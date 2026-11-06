@@ -39,6 +39,10 @@ mod cases;
 
 #[path = "bestest/reference_bands.rs"]
 mod reference_bands;
+
+#[cfg(feature = "experimental-scriptf")]
+#[path = "bestest_strict_b8/residual_arms.rs"]
+mod residual_arms;
 use cases::{BestestCase, in_depth_cases};
 use hares_core::Dwelling;
 use reference_bands::{BestestMetric, ReferenceBand, core_reference_bands};
