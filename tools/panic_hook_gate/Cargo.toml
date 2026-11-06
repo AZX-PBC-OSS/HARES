@@ -1,0 +1,18 @@
+[package]
+name = "panic_hook_gate"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+publish = false
+
+# A standalone workspace: the witness must build the leaf without the main
+# workspace's unified test features. As a member it would inherit the leaf's
+# profiling feature from other members' dev-dependencies, and the absence arm
+# would read the presence arm's state.
+[workspace]
+
+[features]
+profiling = ["hares-types/profiling"]
+
+[dependencies]
+hares-types = { path = "../../crates/hares-types" }

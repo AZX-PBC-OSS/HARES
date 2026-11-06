@@ -240,7 +240,7 @@ fn custom_hook(info: &PanicHookInfo<'_>) {
 /// which thread owns the guard.
 ///
 /// The hook's install machinery is compiled only under the profiling
-/// feature: without it the guard is an inert shell — [`PanicHookGuard::new`]
+/// feature: without it the guard is an inert shell; [`PanicHookGuard::new`]
 /// installs nothing and the [`Drop`] restore does nothing.
 ///
 /// ```ignore
@@ -344,8 +344,10 @@ pub fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String
 // machinery-absent arm of the gate is witnessed by the no-feature
 // workspace compile (the CI clippy matrix's default arm), where the
 // module carries only the error-path survivors and the inert guard
-// shell, and by the standalone path-dependency probe (see the witness
-// test below for its recorded readings).
+// shell, and by the standalone path-dependency probe at
+// `tools/panic_hook_gate` (its own workspace, so the leaf's feature is
+// not unified in from another member's dev-dependency; the `panic hook
+// gate` CI job runs both arms). See the witness test below.
 #[cfg(all(test, feature = "profiling"))]
 mod tests {
     use super::*;
@@ -630,12 +632,15 @@ mod tests {
     /// beside this one (the machinery does not exist without the
     /// feature), so it is witnessed structurally by the no-feature
     /// workspace compile and behaviourally by the standalone
-    /// path-dependency probe kept outside the workspace (whose
+    /// path-dependency probe at `tools/panic_hook_gate` (its own
+    /// workspace, so no other member's dev-dependency unifies the leaf's
+    /// feature in). That probe's
     /// `installed == cfg!(feature = "profiling")` and
     /// `enriched == cfg!(feature = "profiling")` assertions read
     /// `installed=true enriched=true` against the ungated parent
     /// without the feature - the red - and `installed=false
-    /// enriched=false` against this gate - the green).
+    /// enriched=false` against this gate - the green; the `panic hook
+    /// gate` CI job runs both arms.
     #[test]
     fn profiling_gate_carries_the_install_machinery() {
         let _guard = PanicHookGuard::new();
@@ -648,8 +653,13 @@ mod tests {
             panic::catch_unwind(AssertUnwindSafe(|| panic!("gate witness panic"))).unwrap_err();
         let msg = panic_payload_to_string(payload);
         assert!(
-            msg.contains(" — "),
-            "with the profiling feature the hook must enrich the message with its location: {msg}"
+            msg.contains("panic_hook.rs:"),
+            "with the profiling feature the hook must prefix the message with its file:line \
+             location: {msg}"
+        );
+        assert!(
+            msg.contains("gate witness panic"),
+            "the enriched message must still carry the panic's payload: {msg}"
         );
     }
 }
