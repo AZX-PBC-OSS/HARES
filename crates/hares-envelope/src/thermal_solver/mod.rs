@@ -134,6 +134,13 @@ pub struct ThermalSolver {
     /// `build_input_vector` mutates them and copies them back afterwards
     /// (was a per-step `Vec` clone).
     ext_temps_save_buf: Vec<f64>,
+    /// The instrument for the environment half of the input build: how many
+    /// times the outdoor/solar/exterior-solar/exterior-longwave passes have
+    /// evaluated. An ordinary prepare-then-integrate step runs the half once
+    /// per `build_input_vector` call today, so the count advances by two per
+    /// step; a step whose integrate reuses the prepare phase's evaluation
+    /// advances it by one. Read through [`ThermalSolver::environment_evaluations`].
+    environment_evaluations: u64,
     /// Last-step component gains for output/diagnostics.
     component_gains: EnvelopeComponentGains,
     /// Reusable buffer for interior surface temperatures in LWR calculation.
@@ -1434,6 +1441,7 @@ impl ThermalSolver {
             latent_buf,
             exterior_surface_temps,
             ext_temps_save_buf,
+            environment_evaluations: 0,
             // Pre-allocate the observe-gated per-zone jacket-loss buffer at
             // init (hot-path discipline: no per-timestep heap allocation).
             // `prepare_inputs` refills it in place each step, reusing the
@@ -1523,6 +1531,17 @@ impl ThermalSolver {
         &self.x
     }
 
+    /// The environment half's evaluation count since construction: how many
+    /// times the input build has run the outdoor/solar/exterior-solar/
+    /// exterior-longwave passes. The reuse instrument for the prepare-then-
+    /// integrate sequence: an ordinary step evaluates the half once per
+    /// `build_input_vector` call (two per step); a step whose integrate
+    /// phase adopts the prepare phase's captured evaluation runs it once.
+    #[must_use]
+    pub fn environment_evaluations(&self) -> u64 {
+        self.environment_evaluations
+    }
+
     /// Clears the shared ideal-capacity solve prefix: the caller is about to
     /// change (or has changed) the step's `x` or `last_u` that the prefix was
     /// computed from, so a cached prefix would be stale. Called by every
@@ -1555,6 +1574,15 @@ impl ThermalSolver {
             u = DVector::zeros(n);
         }
 
+        // The environment half: outdoor columns, solar distribution,
+        // exterior solar, exterior longwave with the skin fixed point.
+        // Counted once per evaluation: an ordinary step evaluates the half
+        // once per `build_input_vector` call (the prepare phase's and the
+        // integrate phase's), and the count is the reuse instrument for the
+        // deduplication. The debug breakdown path re-derives the same passes
+        // by hand and deliberately does not count: it is not a step's
+        // evaluation.
+        self.environment_evaluations += 1;
         self.apply_outdoor_inputs(&mut u, env);
         self.refresh_solar_slot_map(env);
 
@@ -9445,5 +9473,198 @@ mod tests {
             );
             assert_eq!(solver.solve_tail_calls, 1);
         }
+    }
+
+    /// A solver shaped like the standing step bench, at test scale: one
+    /// zone, one iterative-path exterior wall, one linearized-path slab to
+    /// ground, one window on the sky-correction branch, a ground depth, and
+    /// solar irradiance on every exterior surface. The environment half
+    /// runs every pass of it, so the input-build reuse witnesses exercise
+    /// the real hot path.
+    fn env_cache_solver(env: &EnvironmentState) -> ThermalSolver {
+        use crate::thermal_solver::WindowSolarProperties;
+
+        let n_states = 3usize;
+        let n_inputs = 6usize;
+        let c_zone = 360_000.0;
+        let c_node = 900_000.0;
+        let mut a_c = DMatrix::zeros(n_states, n_states);
+        let mut b_c = DMatrix::zeros(n_states, n_inputs);
+        // Zone air: window UA to outdoor, wall and slab couplings.
+        a_c[(0, 0)] = -(3.0 + 4.0 + 5.0) / c_zone;
+        a_c[(0, 1)] = 3.0 / c_zone;
+        a_c[(0, 2)] = 4.0 / c_zone;
+        b_c[(0, 0)] = 5.0 / c_zone;
+        b_c[(0, 5)] = 1.0 / c_zone;
+        // Wall node: exterior film + zone coupling, injection column 2.
+        a_c[(1, 1)] = -(3.0 + 3.0) / c_node;
+        a_c[(1, 0)] = 3.0 / c_node;
+        b_c[(1, 0)] = 3.0 / c_node;
+        b_c[(1, 2)] = 1.0 / c_node;
+        // Slab node: zone coupling + ground column, injection column 3.
+        a_c[(2, 2)] = -(4.0 + 2.0) / (2.0 * c_node);
+        a_c[(2, 0)] = 4.0 / (2.0 * c_node);
+        b_c[(2, 1)] = 2.0 / (2.0 * c_node);
+        b_c[(0, 2)] = 0.0;
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 5)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![1],
+            ground_temp_input_depths_m: vec![0.5],
+            solar_input_indices: HashMap::from([(20_u32, 4_usize)]),
+            c_zone_j_k: HashMap::from([(ZoneId(1), c_zone)]),
+            ..Default::default()
+        };
+
+        let (transmittance, radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(0.4, 1.8, 0.01);
+        let window = WindowSolarProperties {
+            shgc: 0.4,
+            winter_shgc: 0.4,
+            u_factor_w_m2_k: 1.8,
+            area_m2: 8.0,
+            transmittance,
+            winter_transmittance: transmittance,
+            radiation_frac,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, 0.4),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        };
+
+        let r_film = 0.04;
+        let r_half = 0.10;
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::from([(20_u32, window)]),
+            window_zone_ids: HashMap::from([(20_u32, ZoneId(1))]),
+            window_ids_sorted: vec![20_u32],
+            exterior_surfaces: vec![
+                ExteriorSurfaceInfo {
+                    surface_id: 10,
+                    state_index: 1,
+                    input_index: 2,
+                    area_m2: 40.0,
+                    emissivity: 0.9,
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: r_film / (r_film + r_half),
+                    rad_res_k_w: (r_film * r_half / (r_film + r_half)) / 40.0,
+                    n_iter: 4,
+                    absorptance: 0.7,
+                    boundary_category: Some(BoundaryCategory::Wall),
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 25.0,
+                },
+                ExteriorSurfaceInfo {
+                    surface_id: 20,
+                    state_index: 0,
+                    input_index: 5,
+                    area_m2: 8.0,
+                    emissivity: 0.84,
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 4,
+                    absorptance: 0.0,
+                    boundary_category: Some(BoundaryCategory::Window),
+                    u_factor_w_m2_k: 2.5,
+                    h_out_w_m2_k: 25.0,
+                },
+                ExteriorSurfaceInfo {
+                    surface_id: 30,
+                    state_index: 2,
+                    input_index: 3,
+                    area_m2: 48.0,
+                    emissivity: 0.9,
+                    tilt_deg: 180.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 4,
+                    absorptance: 0.0,
+                    boundary_category: Some(BoundaryCategory::Floor),
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 25.0,
+                },
+            ],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
+                .expect("env cache witness solver");
+        solver.x[0] = env.zones[0].temperature_c;
+        solver
+    }
+
+    fn env_cache_env() -> EnvironmentState {
+        let mut env = env_for_temp(24.0, 5.0);
+        env.weather.sky_temp_c = -5.0;
+        env.weather.ground_temp_c = 10.0;
+        env.weather.solar_irradiance = vec![
+            SurfaceIrradiance {
+                surface_id: 10,
+                direct_w_m2: 300.0,
+                diffuse_w_m2: 100.0,
+                reflected_w_m2: 40.0,
+                angle_of_incidence_rad: 0.9,
+            },
+            SurfaceIrradiance {
+                surface_id: 20,
+                direct_w_m2: 250.0,
+                diffuse_w_m2: 110.0,
+                reflected_w_m2: 60.0,
+                angle_of_incidence_rad: 0.7,
+            },
+            SurfaceIrradiance {
+                surface_id: 30,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 120.0,
+                reflected_w_m2: 30.0,
+                angle_of_incidence_rad: 0.0,
+            },
+        ];
+        env
+    }
+
+    /// The environment-half evaluation is once per ordinary step, not once
+    /// per build: the prepare phase's build evaluates the environment half
+    /// and the integrate phase reuses that evaluation (the environment it
+    /// reads and the thermal state it reads are unchanged between the two
+    /// builds), so one `resolve` step advances the counter by exactly one.
+    #[test]
+    fn environment_evaluation_is_once_per_ordinary_step() {
+        let env = env_cache_env();
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut solver = env_cache_solver(&env);
+
+        // Warm the skin fixed points; the steady-state path is the contract.
+        for _ in 0..5 {
+            solver
+                .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+                .unwrap();
+        }
+        let before = solver.environment_evaluations();
+        solver
+            .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            solver.environment_evaluations() - before,
+            1,
+            "an ordinary step evaluates the environment half once"
+        );
     }
 }

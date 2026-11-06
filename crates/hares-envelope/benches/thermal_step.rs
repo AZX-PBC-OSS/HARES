@@ -270,6 +270,32 @@ fn thermal_step_benchmark(c: &mut Criterion) {
         });
     });
 
+    // The two-phase sequence spelled out: the prepare phase's build (the
+    // environment half plus the pre-dispatch ports) and the integrate
+    // phase's build (the same environment half plus the post-dispatch
+    // ports) around the dispatch boundary. The paired measurement for the
+    // environment-half reuse: a capture that integrate adopts removes the
+    // second half's evaluation from this sequence.
+    group.bench_function("prepare_integrate_6_surfaces_15min", |b| {
+        let mut solver = bench_solver(&env);
+        for _ in 0..20 {
+            solver.prepare_inputs(&ports, &env).expect("warmup prepare");
+            solver
+                .integrate(&ports, &env, &mut out)
+                .expect("warmup integrate");
+            out.clear();
+        }
+        b.iter(|| {
+            solver
+                .prepare_inputs(black_box(&ports), black_box(&env))
+                .expect("prepare");
+            solver
+                .integrate(black_box(&ports), black_box(&env), black_box(&mut out))
+                .expect("integrate");
+            out.clear();
+        });
+    });
+
     group.finish();
 }
 
