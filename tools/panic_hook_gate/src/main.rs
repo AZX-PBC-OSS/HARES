@@ -4,41 +4,62 @@
 //! workspace's unified test features: the absence arm must read the leaf's
 //! own feature, not another member's dev-dependency. Run once plain and once
 //! with `--features profiling`; each run asserts the reading its feature
-//! selects. Against a leaf whose guard installs ungated, the plain run reads
-//! the hook installed and the location enriched, and fails: the red.
+//! selects.
+//!
+//! The absence arm watches the default panic report on stderr. A child of
+//! this binary holds a [`hares_types::panic_hook::PanicHookGuard`] and lets
+//! a panic escape; without the feature the default hook prints the report,
+//! and a guard that wrongly installs the custom hook suppresses it. Against
+//! the ungated parent the plain run read the report suppressed: the red.
 
+use std::env;
 use std::panic::{self, AssertUnwindSafe};
+use std::process::Command;
 
 use hares_types::panic_hook::{self, PanicHookGuard};
 
-fn main() {
-    let _guard = PanicHookGuard::new();
-    let installed = panic_hook::is_installed();
+const CHILD_ENV: &str = "PANIC_HOOK_GATE_CHILD";
 
-    let payload = panic::catch_unwind(AssertUnwindSafe(|| panic!("gate witness panic")))
-        .expect_err("the witness panic must unwind");
-    let message = panic_hook::panic_payload_to_string(payload);
-    // The hook's enriched form prefixes the message with `file:line`; the
-    // panic site is this file, so the location marker is `main.rs:`.
-    let enriched = message.contains("main.rs:");
+fn main() {
+    if env::var_os(CHILD_ENV).is_some() {
+        // The guard is alive when the panic escapes: the process-wide hook
+        // decides whether stderr carries the default report.
+        let _guard = PanicHookGuard::new();
+        panic!("gate witness panic");
+    }
 
     let expected = cfg!(feature = "profiling");
-    // Stderr is unbuffered and the leaf's hook, when wrongly installed,
-    // silences the panic path: print the readings before any assertion so a
-    // failing arm still reports what it saw.
-    eprintln!(
-        "the panic hook gate: installed={installed} enriched={enriched} profiling={expected}"
-    );
+    let child = Command::new(env::current_exe().expect("the witness binary's path"))
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn the witness child");
+    let report = String::from_utf8_lossy(&child.stderr);
+    let reported = report.contains("gate witness panic");
+
+    // The caught-panic arm: with the feature the guard's hook enriches the
+    // message with the panic site; without it the payload stays raw.
+    let enriched = {
+        let _guard = PanicHookGuard::new();
+        #[cfg(feature = "profiling")]
+        assert!(
+            panic_hook::is_installed(),
+            "with the profiling feature the guard must install the hook"
+        );
+        let payload = panic::catch_unwind(AssertUnwindSafe(|| panic!("gate witness panic")))
+            .expect_err("the witness panic must unwind");
+        panic_hook::panic_payload_to_string(payload).contains("main.rs:")
+    };
+
+    // Without the hook the default hook reports the panic; with it the custom
+    // hook suppresses the report. The report and the enrichment therefore
+    // move in opposite directions across the feature.
+    eprintln!("the panic hook gate: reported={reported} enriched={enriched} profiling={expected}");
     assert_eq!(
-        installed, expected,
-        "the guard's install must follow the leaf's profiling feature: {message}"
+        reported, !expected,
+        "the default panic report must survive exactly when the hook is absent: {report}"
     );
     assert_eq!(
         enriched, expected,
-        "the location enrichment must follow the leaf's profiling feature: {message}"
-    );
-    assert!(
-        message.contains("gate witness panic"),
-        "the panic's payload must reach the message in both arms: {message}"
+        "the location enrichment must follow the leaf's profiling feature"
     );
 }
