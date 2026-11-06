@@ -149,33 +149,56 @@ fn run_single_case(case: &BestestCase) {
 /// row carries: the star-mesh interior LWR form (OCHRE/TRNSYS/ESP-r's)
 /// against the E+ MRT form, and the Kusuda-Achenbach ground mean against
 /// the BESTEST's constant.
+/// Re-measured 2026-11-05 (the gains case-input correction: the eight
+/// BESTEST case fixtures' internal-gain radiant fraction moves 0.3 to 0.6,
+/// the ASHRAE 140-2017 Addendum a Section 5.2.1.7 case value; the engine is
+/// untouched and every movement below is the split's, each case run at both
+/// commits). 600 heating 3962.481116 → 4033.911883 (IN BAND, baseline
+/// withdrawn), 600 cooling 5466.121835 → 5411.481456 (was IN BAND, now
+/// 20.5 kWh below its 5432 floor: the one worsened residual, pinned on its
+/// new baseline with the closure-hypothesis kill the record carries), 640
+/// heating energy 2489.196688 → 2543.689729 (in band), 650 cooling
+/// 4515.286511 → 4460.518595 (in band), 900 heating 1308.992884 →
+/// 1342.637964 (still out; the deficit halves, −70.0 → −36.4 below the
+/// floor), 900 cooling 2406.477181 → 2414.283991 (in band), 600FF peak
+/// 70.353152 → 70.248155 (still out, 1.85 K over), 600FF min −11.898906 →
+/// −12.002474 (in band), 900FF peak 45.637798 → 45.528453 (in band), 900FF
+/// min 2.487962 → 2.379882 (still out, 0.18 K over), 920 heating
+/// 3167.274253 → 3218.034154 and cooling 2676.002725 → 2696.103031 (in
+/// band), 950 cooling 648.128364 → 629.396857 (in band). The no-change
+/// controls are bitwise at both commits: 195 heating 3979.967248 and
+/// cooling 601.819095, 395 heating 4385.626148 and cooling 11.988883.
 fn drift_baseline(case_id: &str, metric: BestestMetric) -> Option<f64> {
     use BestestMetric::*;
     Some(match (case_id, metric) {
-        // 600: heating 3962.5 vs band 3993–4504; the cooling load landed
-        // in its band (5469.3 in [5432, 6162]) with the controller's hold.
-        ("600", AnnualHeatingLoadKwh) => 3962.481116,
-        // 640: heating energy IN BAND (2485.5 in [2403, 2682]) with the
-        // controller's hold; no baseline.
+        // 600: heating IN BAND (4033.9 in [3993, 4504]) since the gains'
+        // radiant split moved to the standard's 0.6; baseline withdrawn.
+        // Cooling: 5411.5 vs band 5432–6162, 20.5 under the floor: it was
+        // in band at the parent and the split moved it below, the one
+        // worsened residual the re-measure above records.
+        ("600", AnnualCoolingLoadKwh) => 5411.481456,
+        // 640: heating energy IN BAND (2543.7 in [2403, 2682]); no baseline.
         // 395: heating 4385.6 vs band 4565–5145 (4.0 % under the floor;
-        // cooling 12.3 in [4, 21]). The 195 twin (the same envelope at
-        // emittance 0.1) lands in band on the same physics; the 395's
-        // emittance-0.9 row carries the modeling-choice aggregate the
-        // function doc names.
+        // cooling 11.99 in [4, 21]; both bitwise at the parent: the in-depth
+        // pair is the gains family's zero-gain control). The 195 twin (the
+        // same envelope at emittance 0.1) lands in band on the same physics;
+        // the 395's emittance-0.9 row carries the modeling-choice aggregate
+        // the function doc names.
         ("395", AnnualHeatingLoadKwh) => 4385.626148,
-        // 900: heating 1309.0 vs band 1379–1814. The slab's seasonal
+        // 900: heating 1342.6 vs band 1379–1814 (2.5 % under the floor; the
+        // split halved the deficit from 70.0). The slab's seasonal
         // memory is the reduction's diurnal-band fit residual (the fit
         // serves the diurnal period the ISO witness pins; the exceedance
         // counter is zero on these assemblies), the envelope-numerics
         // row's neighbor.
-        ("900", AnnualHeatingLoadKwh) => 1308.992884,
+        ("900", AnnualHeatingLoadKwh) => 1342.637964,
         // 600FF: peak vs band 62.4–68.4 (min in band: strict). The
         // ceiling's enhanced film bleeds the free-float peak toward the
-        // attic: 70.35, 2.0 K over.
-        ("600FF", PeakZoneTempC) => 70.353152,
-        // 900FF: peak IN BAND (45.66 in [43.3, 46.0]); min vs 0.6–2.2 at
-        // 2.49.
-        ("900FF", MinZoneTempC) => 2.487962,
+        // attic: 70.25, 1.85 K over.
+        ("600FF", PeakZoneTempC) => 70.248155,
+        // 900FF: peak IN BAND (45.53 in [43.3, 46.0]); min vs 0.6–2.2 at
+        // 2.38 (0.18 over; the split moved it from 2.49).
+        ("900FF", MinZoneTempC) => 2.379882,
         _ => return None,
     })
 }
@@ -331,12 +354,16 @@ fn bestest_case_640() {
 // the_equipment`), the ideal controller holding the declared bound
 // (`ideal_controller_holds_the_declared_heating_bound`), and the interior
 // film's frozen regime keyed on the tilt's geometry. Cases 195 (heating
-// 3974.9, cooling 601.9), 920 (heating 3162.8, cooling 2678.6) and 395's
-// cooling (12.3) land in band. Case 395's heating runs 4385.6 against the
+// 3979.967248, cooling 601.819095), 920 (heating 3218.034154, cooling
+// 2696.103031) and 395's cooling (11.988883) land in band. Case 395's
+// heating runs 4385.626148 against the
 // floor 4565 (4.0 percent under, the signed distance prints on every run)
 // on a drift lock: the modeling-choice aggregate (the star-mesh interior
 // LWR form against E+'s MRT form, and the Kusuda-Achenbach ground mean)
-// whose disposition is the operator's. No band widened.
+// whose disposition is the operator's. The 195 and 395 figures are bitwise
+// the parent's (the pair is the gains family's zero-gain control; the
+// figures the block printed before the 2026-11-05 re-measure predate the
+// economizer's landing). No band widened.
 
 /// The synthetic fixture's declared thermostat pair reaches the equipment
 /// verbatim. ASHRAE 140's in-depth cases pin their thermostat as part of the
