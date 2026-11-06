@@ -7,6 +7,18 @@
 //! iterative exterior LWR with warm start, window sky correction),
 //! infiltration coupling, and the coupled state advance.
 //!
+//! Standing record, the environment-half reuse's paired gate (measured
+//! 2026-11-05, five rounds, one sitting, base and tip alternating, the
+//! identical binary re-run per side as the base-versus-base noise
+//! control): the two-phase step sequence improves 11.1 to 17.5 percent per
+//! matched pair (median of medians 12.3 percent: 720.47 ns to 631.83 ns)
+//! against a base-vs-base noise span of 8.9 percent, every pair outside
+//! it. The end-to-end `rl_step` benches read shifts of +3.2 (single),
+//! +2.3 (vec 10) and +18.5 (vec 100) percent, each inside its own
+//! base-vs-base span (30.7, 6.7, 53.8 percent) with matched-pair signs
+//! flipping, so no regression is supported there. The allocation census's
+//! zero-allocation witnesses pass at both sides (0 = 0 per side).
+//!
 //! Topology: one conditioned zone, 4 opaque exterior surfaces (roof +
 //! 3 walls, iterative rad_frac > 0 path), 1 south window (U-factor
 //! correction path), 1 slab to ground (linearized path), AIM-2-style
