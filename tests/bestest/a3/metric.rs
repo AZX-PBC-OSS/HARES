@@ -92,7 +92,14 @@ pub fn pearson(x: &[f64], y: &[f64]) -> Result<f64, MetricError> {
         sxx += dx * dx;
         syy += dy * dy;
     }
-    let side = match (sxx == 0.0, syy == 0.0) {
+    // A bitwise-constant vector has zero variance mathematically, but its
+    // computed mean can round away from the repeated value (for example,
+    // [0.1, 0.1, 0.1]'s mean is not the literal 0.1), leaving tiny nonzero
+    // deviations. Detect the exact constant directly so the refusal does
+    // not depend on the mean being representable.
+    let constant_x = x.iter().all(|value| *value == x[0]);
+    let constant_y = y.iter().all(|value| *value == y[0]);
+    let side = match (constant_x || sxx == 0.0, constant_y || syy == 0.0) {
         (true, true) => ZeroVarianceSide::Both,
         (true, false) => ZeroVarianceSide::X,
         (false, true) => ZeroVarianceSide::Y,
@@ -188,6 +195,32 @@ mod tests {
         );
         assert_eq!(
             pearson(&[5.0, 5.0], &[7.0, 7.0]).unwrap_err(),
+            MetricError::ZeroVariance {
+                side: ZeroVarianceSide::Both
+            }
+        );
+    }
+
+    #[test]
+    fn pearson_refuses_bitwise_constant_samples_whose_mean_rounds() {
+        // 0.1's f64 mean over three copies is not the literal 0.1, so the
+        // summed deviations are tiny but nonzero; the sample is still
+        // constant, so the coefficient is undefined and the kernel must
+        // refuse rather than return a number.
+        assert_eq!(
+            pearson(&[0.1, 0.1, 0.1], &[1.0, 2.0, 3.0]).unwrap_err(),
+            MetricError::ZeroVariance {
+                side: ZeroVarianceSide::X
+            }
+        );
+        assert_eq!(
+            pearson(&[1.0, 2.0, 3.0], &[-0.1, -0.1, -0.1]).unwrap_err(),
+            MetricError::ZeroVariance {
+                side: ZeroVarianceSide::Y
+            }
+        );
+        assert_eq!(
+            pearson(&[0.1, 0.1, 0.1], &[0.1, 0.1, 0.1]).unwrap_err(),
             MetricError::ZeroVariance {
                 side: ZeroVarianceSide::Both
             }
