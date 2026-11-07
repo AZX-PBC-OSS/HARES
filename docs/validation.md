@@ -21,6 +21,7 @@ laws are enforced at runtime via invariant checks.
 | [Whole-building parity](#ochre-parity-tests) | End-to-end energy, power columns | OCHRE simulator | `tests/python/test_ochre_parity.py` |
 | [BESTEST](#bestest-ashrae-140) | Annual loads, peak temperatures | ASHRAE 140-2023 | `tests/bestest/` |
 | [A3 acceptance](#the-normative-a3-acceptance-mode) | The normative software acceptance criteria (single-value ranges, the two dates' hourly comparisons, the minimum-case rule) | ASHRAE 140-2023 Addendum a | `tests/bestest/a3/` |
+| [Empirical validation](#empirical-validation-ashrae-140-section-13) | Steady-state heater energy vs measured ETNA data within measurement uncertainty | ASHRAE 140-2023 Addendum b Section 13 | `tests/etna/` |
 | [Conservation laws](#conservation-of-energy) | Energy balance, temperature bounds | First principles | `hares-envelope/tests/solver_energy_conservation.rs` |
 | [Runtime invariants](#runtime-invariants) | Per-timestep numerical sanity | First principles | `hares-core/src/invariants.rs` |
 
@@ -259,6 +260,117 @@ cargo test --release -- --ignored bestest
 
 ---
 
+## Empirical Validation (ASHRAE 140 Section 13)
+
+ASHRAE 140-2023 Addendum b (2026-04-24) adds the standard's first
+empirical validation tests: Section 13, "Building Thermal Fabric
+Empirical Validation Tests". Six twin-cell steady-state cases from the
+ETNA facility ("Essais Thermique en climat Naturel et Artificiel",
+Melun, France) compare simulated heater energy against measured data
+within the measurement's uncertainty: a physical truth standard,
+unlike the Section 7 comparative bands.
+
+Location: `tests/etna/` (its own test target, `cargo nextest run
+--test etna`), separate from the annual BESTEST module by construction: no
+shared file, and the Section 7 core reference bands
+(`tests/bestest/reference_bands.rs`) carry no Section 13 identifier
+(the separation has its own test).
+
+### The six cases
+
+| Case | Cell | Window insulation | Interior surface heat transfer | Specification |
+|------|------|-------------------|--------------------------------|---------------|
+| ET110A1 | A | insulated | constant combined coefficients | 13.2.2 |
+| ET110B1 | B | insulated | constant combined coefficients | 13.2.3 |
+| ET100A1 | A | uninsulated | constant combined coefficients | 13.2.4 |
+| ET100B1 | B | uninsulated | constant combined coefficients | 13.2.5 |
+| ET100A3 | A | uninsulated | the program's own algorithms | 13.2.6 |
+| ET100B3 | B | uninsulated | the program's own algorithms | 13.2.7 |
+
+The comparison quantity is the hourly integrated heater energy Qhtr
+[Wh] over each case's best steady-state window: 18 hours (2/10/2000
+16:00 through 2/11/2000 09:00, GMT+1) for the ET110 pair and 55 hours
+(9/16/2000 08:00 through 9/18/2000 14:00) for the ET100 pair. These
+windows are the standard's own steady-state determination (the
+addendum's Sections 13.3.2.4.1 through 13.3.7.4.1, from Informative
+Annex B23.2's temporal uncertainty analysis); software results before
+the window are not part of the comparison. The artificial climate
+holds the test cell at 35 °C and the six guard zones at approximately
+10 °C, and the committed measured series pins those temperatures per
+dataset.
+
+### Provenance (hash-pinned)
+
+- The addendum PDF, sha256
+  `7257eb68b09faa3c9350cb9bc85a8e6c5b5fd89985c7adc07a070b84aca267df`.
+- The public Section 13 Analysis Files bundle,
+  `data.ashrae.org/standard140/AnalysisFiles/Section13_Analysis_Files.zip`,
+  sha256
+  `970927ec622edf237b715f3c9fd2649d0bd4a7a421c5720900b10addf38fa058`:
+  the hourly measured series and propagated uncertainty bands
+  (`MeasurementData.json`, byte-exact), the acceptance-threshold
+  configuration (`ET_config.yaml`, byte-exact), and the example
+  programs' hourly results (`ExampleSoftwareData.json`, the six
+  comparison windows extracted).
+- The full hash table and the extraction procedure:
+  `tests/fixtures/etna/README.md`.
+
+The tests never touch the network: the committed bytes are hash-verified
+on every run.
+
+### The comparison kernel
+
+`tests/etna/kernel.rs` mirrors the archive's own acceptance machinery:
+CV(RMSE) of the modeled hourly Qhtr against the MEASURED AVERAGE over
+the window (each hour against the average, because intra-period
+measurement fluctuations are within the uncertainty band and are not
+part of the acceptance signal), passing at the case's threshold with
+the B12.2 rounding tolerance of max(1% of the threshold, 0.01%); plus
+the uncertainty-band comparison against measured ± u(Qhtr), with
+u(Qhtr) the addendum's 2-sigma measurement uncertainty (0.9% / 1.0% /
+0.7% / 0.9% / 0.7% / 0.9% per case). The kernel is proved on
+hand-computed examples and on planted errors (a 1% bias, a unit error,
+a sign error: each is flagged) before any case comparison runs.
+
+The cross-check runs the archive's own example programs (EnergyPlus
+23.1, TRNSYS 18.04, CSE 0.926.0, ESP-r 13.3.16, DesignBuilder 8.0.0.067,
+DeST 2.0, IES-VE 2023.5.2.0) through the same kernel path: all 37
+program-case CV(RMSE) verdicts reproduce the independently computed
+values, and all 37 pass their case's acceptance criterion (the
+addendum's B8.4.3.1: the example results demonstrate the specification's
+vetting). 35 of the 37 modeled averages sit within the measured
+uncertainty band; the two exceptions are the archive's own ESP-r
+results for the program-selected-algorithm cases, which the same
+B8.4.3.1 paragraph anticipates ("a tested program may disagree with
+empirical data without necessarily being incorrect"). Nothing in these
+comparisons derives from HARES output.
+
+### The HARES case runs' disposition
+
+The comparison contract for all six cases is pinned and the kernel is
+in place; the HARES case models are not. The ETNA comparison needs the
+guard zones' measured hourly temperatures applied as boundary
+conditions on each test-cell surface (the addendum's recommended
+Section 13.2.2.7.1 formulation) or as separately controlled zones
+(Section 13.2.2.7.3), with each surface's constant combined film
+coefficients settable per fixture (the imputed conductivities' own
+derivation assumption). The engine's exterior boundary carries one
+shared outdoor temperature, the films are engine-computed, and the
+synthetic fixture builder constructs a single conditioned zone, so the
+case models cannot be expressed through the existing input surfaces.
+Building that general model surface is a separate operator-approved
+row; the measured data, thresholds, and comparison kernel land first,
+and the case comparisons consume them when the surface exists. No
+conformance claim is made or implied until then.
+
+### Running the empirical suite
+
+```bash
+cargo nextest run -p hares-core --test etna
+```
+
+---
+
 ## Physics Reference Values
 
 `hares-physics/tests/physics_validation_tests.rs` validates individual
@@ -381,6 +493,7 @@ Different validation layers use different tolerance strategies:
 |-------------------|----------------|
 | ASHRAE 140-2023 | BESTEST reference bands for envelope validation |
 | ASHRAE 140-2023 Addendum a (2025-08-29, sha256 cb993847ccd4a50a10a09e27cbfc199536487490952d1438ee575e52a616e892) | The Normative Annex A3 software acceptance criteria: single-value ranges, the February 1 and July 14 representative curves and limits, the minimum-case rule |
+| ASHRAE 140-2023 Addendum b Section 13 (ETNA) | Empirical validation: measured heater energy and uncertainty bands for the twin-cell steady-state cases |
 | ASHRAE HOF 2021 Ch. 1 | Psychrometric equations, saturation pressure |
 | ASHRAE HOF 2021 Ch. 16 | Infiltration (AIM-2 wind-stack model) |
 | ASHRAE HOF 2021 Ch. 4 | Natural convection (TARP h formula) |
