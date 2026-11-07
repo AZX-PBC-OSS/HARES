@@ -7,6 +7,18 @@
 //! iterative exterior LWR with warm start, window sky correction),
 //! infiltration coupling, and the coupled state advance.
 //!
+//! Standing record, the environment-half reuse's paired gate (measured
+//! 2026-11-05, five rounds, one sitting, base and tip alternating, the
+//! identical binary re-run per side as the base-versus-base noise
+//! control): the two-phase step sequence improves 11.1 to 17.5 percent per
+//! matched pair (median of medians 12.3 percent: 720.47 ns to 631.83 ns)
+//! against a base-vs-base noise span of 8.9 percent, every pair outside
+//! it. The end-to-end `rl_step` benches read shifts of +3.2 (single),
+//! +2.3 (vec 10) and +18.5 (vec 100) percent, each inside its own
+//! base-vs-base span (30.7, 6.7, 53.8 percent) with matched-pair signs
+//! flipping, so no regression is supported there. The allocation census's
+//! zero-allocation witnesses pass at both sides (0 = 0 per side).
+//!
 //! Topology: one conditioned zone, 4 opaque exterior surfaces (roof +
 //! 3 walls, iterative rad_frac > 0 path), 1 south window (U-factor
 //! correction path), 1 slab to ground (linearized path), AIM-2-style
@@ -266,6 +278,32 @@ fn thermal_step_benchmark(c: &mut Criterion) {
                 black_box(std::time::Duration::from_secs(900)),
                 black_box(&mut out),
             );
+            out.clear();
+        });
+    });
+
+    // The two-phase sequence spelled out: the prepare phase's build (the
+    // environment half plus the pre-dispatch ports) and the integrate
+    // phase's build (the same environment half plus the post-dispatch
+    // ports) around the dispatch boundary. The paired measurement for the
+    // environment-half reuse: a capture that integrate adopts removes the
+    // second half's evaluation from this sequence.
+    group.bench_function("prepare_integrate_6_surfaces_15min", |b| {
+        let mut solver = bench_solver(&env);
+        for _ in 0..20 {
+            solver.prepare_inputs(&ports, &env).expect("warmup prepare");
+            solver
+                .integrate(&ports, &env, &mut out)
+                .expect("warmup integrate");
+            out.clear();
+        }
+        b.iter(|| {
+            solver
+                .prepare_inputs(black_box(&ports), black_box(&env))
+                .expect("prepare");
+            solver
+                .integrate(black_box(&ports), black_box(&env), black_box(&mut out))
+                .expect("integrate");
             out.clear();
         });
     });

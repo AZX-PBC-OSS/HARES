@@ -206,9 +206,10 @@ pub struct ThermalSolver {
     /// sinks. Paired with `zone_exchange_row_w`.
     zone_env_col_coeffs: Vec<(usize, f64)>,
     /// Per-step lookup: `surface_id` → slot in `env.weather.solar_irradiance`.
-    /// Refreshed twice per timestep by [`Self::refresh_solar_slot_map`] (called
-    /// from `build_input_vector` and the debug breakdown path) so the solar
-    /// and exterior-LWR apply passes index directly instead of rescanning
+    /// Refreshed by [`Self::refresh_solar_slot_map`] on every environment-half
+    /// evaluation (an ordinary step evaluates it once, at the prepare phase's
+    /// capture; a missed reuse re-evaluates it) so the solar and exterior-LWR
+    /// apply passes index directly instead of rescanning
     /// the irradiance vec per surface — O(S) per step total, not O(S²).
     /// The map is rebuilt only when the incoming surface-id sequence changes;
     /// capacity is retained across steps: no steady-state allocation.
@@ -409,6 +410,167 @@ pub struct ThermalSolver {
     /// Per-window solar diagnostic buffer (compiled out in release).
     #[cfg(any(debug_assertions, feature = "observe_detailed"))]
     window_solar_diag_buf: Vec<config::WindowSolarDiag>,
+    /// The environment half's captured evaluation: the input vector after
+    /// the environment passes, the converged exterior skin fixed point, and
+    /// the half's diagnostics. Staged by the prepare phase's build; adopted
+    /// by the same step's integrate build when the reuse check passes (see
+    /// `env_cache_valid`).
+    env_cache: EnvInputSnapshot,
+    /// Whether `env_cache` holds a usable capture. The window is exactly one
+    /// step and one unchanged evaluation state: the prepare phase's build
+    /// sets it after the environment half completes, the integrate build
+    /// consumes it (hit or miss), and `restore_state` clears it. The reuse
+    /// check re-verifies the three inputs the half reads before adopting:
+    /// the environment identity, the state vector, and the exterior warm
+    /// start the capture's fixed point ran from. A solar override, an
+    /// exterior-surface fixed-point update, a restore, a timestep change, or
+    /// any schedule/environment identity change between the phases therefore
+    /// rebuilds, never reuses.
+    env_cache_valid: bool,
+    /// The instrument for the environment-half reuse: the number of times
+    /// the build's environment half has evaluated (the outdoor, solar,
+    /// exterior-solar and exterior-longwave passes). An ordinary
+    /// prepare-then-integrate step evaluates it once at the prepare capture
+    /// and reuses the capture at integrate; the count witnesses the
+    /// deduplication. Read through
+    /// [`ThermalSolver::environment_evaluations`].
+    environment_evaluations: u64,
+}
+
+/// The environment identity the input-build reuse check re-verifies: every
+/// weather scalar, the solar irradiance vec (a solar override changes it),
+/// the current time, the schedule row, and the timestep. Exact equality on
+/// every field (no hashing, no tolerance): a changed field rebuilds.
+///
+/// The identity covers what the environment half reads. The half reads no
+/// zone state (the interior longwave and the airflow passes read
+/// `env.zones`, and those passes re-run every build), so zone state is not
+/// part of the identity. Extend it with any weather field the environment
+/// half grows a read of.
+#[derive(Debug, Clone)]
+struct EnvIdentity {
+    current_time: chrono::DateTime<chrono::FixedOffset>,
+    schedule_row: Option<usize>,
+    time_step_secs: f64,
+    outdoor_temp_c: f64,
+    outdoor_humidity_ratio: f64,
+    outdoor_wet_bulb_c: f64,
+    outdoor_enthalpy_j_kg: f64,
+    wind_speed_m_s: f64,
+    wind_dir_deg: f64,
+    ground_temp_c: f64,
+    sky_temp_c: f64,
+    pressure_kpa: f64,
+    ghi_w_m2: f64,
+    dni_w_m2: f64,
+    dhi_w_m2: f64,
+    solar_altitude_deg: f64,
+    solar_azimuth_deg: f64,
+    mains_temp_c: f64,
+    rainfall_m: f64,
+    ground_albedo: f64,
+    ground_t_mean_c: f64,
+    ground_t_amplitude_c: f64,
+    ground_phase_day: f64,
+    day_of_year: f64,
+    solar_irradiance: Vec<hares_types::SurfaceIrradiance>,
+}
+
+impl EnvIdentity {
+    /// Overwrites the identity from `env` in place. The irradiance vec's
+    /// allocation is reused (`Vec::clone_from`): no per-step allocation.
+    fn capture(&mut self, env: &EnvironmentState) {
+        self.current_time = env.current_time;
+        self.schedule_row = env.schedule_row;
+        self.time_step_secs = env.time_step_secs();
+        self.outdoor_temp_c = env.weather.outdoor_temp_c;
+        self.outdoor_humidity_ratio = env.weather.outdoor_humidity_ratio;
+        self.outdoor_wet_bulb_c = env.weather.outdoor_wet_bulb_c;
+        self.outdoor_enthalpy_j_kg = env.weather.outdoor_enthalpy_j_kg;
+        self.wind_speed_m_s = env.weather.wind_speed_m_s;
+        self.wind_dir_deg = env.weather.wind_dir_deg;
+        self.ground_temp_c = env.weather.ground_temp_c;
+        self.sky_temp_c = env.weather.sky_temp_c;
+        self.pressure_kpa = env.weather.pressure_kpa;
+        self.ghi_w_m2 = env.weather.ghi_w_m2;
+        self.dni_w_m2 = env.weather.dni_w_m2;
+        self.dhi_w_m2 = env.weather.dhi_w_m2;
+        self.solar_altitude_deg = env.weather.solar_altitude_deg;
+        self.solar_azimuth_deg = env.weather.solar_azimuth_deg;
+        self.mains_temp_c = env.weather.mains_temp_c;
+        self.rainfall_m = env.weather.rainfall_m;
+        self.ground_albedo = env.weather.ground_albedo;
+        self.ground_t_mean_c = env.weather.ground_t_mean_c;
+        self.ground_t_amplitude_c = env.weather.ground_t_amplitude_c;
+        self.ground_phase_day = env.weather.ground_phase_day;
+        self.day_of_year = env.weather.day_of_year;
+        self.solar_irradiance
+            .clone_from(&env.weather.solar_irradiance);
+    }
+
+    /// Exact identity match against `env`.
+    fn matches(&self, env: &EnvironmentState) -> bool {
+        self.current_time == env.current_time
+            && self.schedule_row == env.schedule_row
+            && self.time_step_secs == env.time_step_secs()
+            && self.outdoor_temp_c == env.weather.outdoor_temp_c
+            && self.outdoor_humidity_ratio == env.weather.outdoor_humidity_ratio
+            && self.outdoor_wet_bulb_c == env.weather.outdoor_wet_bulb_c
+            && self.outdoor_enthalpy_j_kg == env.weather.outdoor_enthalpy_j_kg
+            && self.wind_speed_m_s == env.weather.wind_speed_m_s
+            && self.wind_dir_deg == env.weather.wind_dir_deg
+            && self.ground_temp_c == env.weather.ground_temp_c
+            && self.sky_temp_c == env.weather.sky_temp_c
+            && self.pressure_kpa == env.weather.pressure_kpa
+            && self.ghi_w_m2 == env.weather.ghi_w_m2
+            && self.dni_w_m2 == env.weather.dni_w_m2
+            && self.dhi_w_m2 == env.weather.dhi_w_m2
+            && self.solar_altitude_deg == env.weather.solar_altitude_deg
+            && self.solar_azimuth_deg == env.weather.solar_azimuth_deg
+            && self.mains_temp_c == env.weather.mains_temp_c
+            && self.rainfall_m == env.weather.rainfall_m
+            && self.ground_albedo == env.weather.ground_albedo
+            && self.ground_t_mean_c == env.weather.ground_t_mean_c
+            && self.ground_t_amplitude_c == env.weather.ground_t_amplitude_c
+            && self.ground_phase_day == env.weather.ground_phase_day
+            && self.day_of_year == env.weather.day_of_year
+            && self.solar_irradiance.as_slice() == env.weather.solar_irradiance.as_slice()
+    }
+}
+
+/// The environment half's captured evaluation (see `ThermalSolver::env_cache`).
+/// Every buffer is sized at construction (or on the first capture) and reused
+/// in place: no steady-state allocation.
+#[derive(Debug, Clone)]
+struct EnvInputSnapshot {
+    /// The environment identity the capture was built from.
+    identity: EnvIdentity,
+    /// The state vector at capture time: the exterior fixed point reads it,
+    /// so a changed state voids the reuse.
+    x: DVector<f64>,
+    /// The exterior warm start the capture's fixed-point iteration ran from:
+    /// the reuse check requires it unchanged, so an exterior fixed-point
+    /// update between the phases rebuilds.
+    ext_temps_warm_start: Vec<f64>,
+    /// The input vector after the environment half, before the interior
+    /// longwave (ScriptF) and port passes.
+    env_u: DVector<f64>,
+    /// The converged exterior skin temperatures the capture produced: the
+    /// adopt path installs them instead of re-running the iteration, so the
+    /// warm start the next step reads is the fresh path's exactly.
+    ext_temps_fixed_point: Vec<f64>,
+    window_solar_injected_w: f64,
+    window_through_glass_w: f64,
+    opaque_solar_w: f64,
+    exterior_lwr_w: f64,
+    #[cfg(feature = "observe")]
+    skin_iteration_cap_exits: u64,
+    #[cfg(feature = "observe")]
+    max_skin_residual_k: f64,
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    ext_surface_diag: Vec<config::ExtSurfaceDiag>,
+    #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+    window_solar_diag: Vec<config::WindowSolarDiag>,
 }
 
 /// Per-component breakdown of zone air sensible contributions.
@@ -1434,6 +1596,53 @@ impl ThermalSolver {
             latent_buf,
             exterior_surface_temps,
             ext_temps_save_buf,
+            env_cache: EnvInputSnapshot {
+                identity: EnvIdentity {
+                    current_time: env.current_time,
+                    schedule_row: env.schedule_row,
+                    time_step_secs: env.time_step_secs(),
+                    outdoor_temp_c: env.weather.outdoor_temp_c,
+                    outdoor_humidity_ratio: env.weather.outdoor_humidity_ratio,
+                    outdoor_wet_bulb_c: env.weather.outdoor_wet_bulb_c,
+                    outdoor_enthalpy_j_kg: env.weather.outdoor_enthalpy_j_kg,
+                    wind_speed_m_s: env.weather.wind_speed_m_s,
+                    wind_dir_deg: env.weather.wind_dir_deg,
+                    ground_temp_c: env.weather.ground_temp_c,
+                    sky_temp_c: env.weather.sky_temp_c,
+                    pressure_kpa: env.weather.pressure_kpa,
+                    ghi_w_m2: env.weather.ghi_w_m2,
+                    dni_w_m2: env.weather.dni_w_m2,
+                    dhi_w_m2: env.weather.dhi_w_m2,
+                    solar_altitude_deg: env.weather.solar_altitude_deg,
+                    solar_azimuth_deg: env.weather.solar_azimuth_deg,
+                    mains_temp_c: env.weather.mains_temp_c,
+                    rainfall_m: env.weather.rainfall_m,
+                    ground_albedo: env.weather.ground_albedo,
+                    ground_t_mean_c: env.weather.ground_t_mean_c,
+                    ground_t_amplitude_c: env.weather.ground_t_amplitude_c,
+                    ground_phase_day: env.weather.ground_phase_day,
+                    day_of_year: env.weather.day_of_year,
+                    solar_irradiance: Vec::new(),
+                },
+                x: DVector::zeros(n_states),
+                ext_temps_warm_start: Vec::with_capacity(n_ext_surfaces),
+                env_u: DVector::zeros(n_inputs),
+                ext_temps_fixed_point: Vec::with_capacity(n_ext_surfaces),
+                window_solar_injected_w: 0.0,
+                window_through_glass_w: 0.0,
+                opaque_solar_w: 0.0,
+                exterior_lwr_w: 0.0,
+                #[cfg(feature = "observe")]
+                skin_iteration_cap_exits: 0,
+                #[cfg(feature = "observe")]
+                max_skin_residual_k: 0.0,
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                ext_surface_diag: Vec::new(),
+                #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+                window_solar_diag: Vec::new(),
+            },
+            env_cache_valid: false,
+            environment_evaluations: 0,
             // Pre-allocate the observe-gated per-zone jacket-loss buffer at
             // init (hot-path discipline: no per-timestep heap allocation).
             // `prepare_inputs` refills it in place each step, reusing the
@@ -1523,6 +1732,87 @@ impl ThermalSolver {
         &self.x
     }
 
+    /// The environment half's evaluation count since construction: how many
+    /// times the input build has run the outdoor/solar/exterior-solar/
+    /// exterior-longwave passes. The reuse instrument for the prepare-then-
+    /// integrate sequence: an ordinary step evaluates the half once per
+    /// `build_input_vector` call (two per step); a step whose integrate
+    /// phase adopts the prepare phase's captured evaluation runs it once.
+    #[must_use]
+    pub fn environment_evaluations(&self) -> u64 {
+        self.environment_evaluations
+    }
+
+    /// Stages the reuse capture's validity inputs before the environment
+    /// half runs: the environment identity, the state vector, and the
+    /// exterior warm start the half's fixed-point iteration will start
+    /// from. Called only from the prepare phase's build; a fresh
+    /// evaluation on any other path never stages.
+    fn stage_env_cache(&mut self, env: &EnvironmentState) {
+        self.env_cache.identity.capture(env);
+        let cache = &mut self.env_cache;
+        if cache.x.len() == self.x.len() {
+            cache.x.copy_from_slice(self.x.as_slice());
+        } else {
+            cache.x = self.x.clone();
+        }
+        cache
+            .ext_temps_warm_start
+            .clone_from(&self.exterior_surface_temps);
+    }
+
+    /// Completes the reuse capture after the environment half ran: the
+    /// half's contribution to `u`, the converged exterior fixed point, and
+    /// the half's diagnostics. The `env_cache_valid` flag turns true only
+    /// here: an error between staging and this point leaves no capture.
+    fn complete_env_cache(
+        &mut self,
+        u: &DVector<f64>,
+        window_solar: config::WindowSolarTotals,
+        opaque_solar_w: f64,
+        exterior_lwr_w: f64,
+    ) {
+        let cache = &mut self.env_cache;
+        if cache.env_u.len() == u.len() {
+            cache.env_u.copy_from_slice(u.as_slice());
+        } else {
+            cache.env_u = u.clone();
+        }
+        cache
+            .ext_temps_fixed_point
+            .clone_from(&self.exterior_surface_temps);
+        cache.window_solar_injected_w = window_solar.injected_w;
+        cache.window_through_glass_w = window_solar.through_glass_w;
+        cache.opaque_solar_w = opaque_solar_w;
+        cache.exterior_lwr_w = exterior_lwr_w;
+        #[cfg(feature = "observe")]
+        {
+            cache.skin_iteration_cap_exits = self.skin_iteration_cap_exits;
+            cache.max_skin_residual_k = self.max_skin_residual_k;
+        }
+        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+        {
+            cache
+                .ext_surface_diag
+                .clone_from(&self.ext_surface_diag_buf);
+            cache
+                .window_solar_diag
+                .clone_from(&self.window_solar_diag_buf);
+        }
+        self.env_cache_valid = true;
+    }
+
+    /// The reuse check: the three inputs the environment half reads must be
+    /// exactly the capture's. Exact equality on every field: the half is a
+    /// deterministic function of (env, x, warm start), so an identical input
+    /// state reproduces the captured work bitwise, and any change rebuilds.
+    fn env_cache_reusable(&self, env: &EnvironmentState) -> bool {
+        let cache = &self.env_cache;
+        self.x == cache.x
+            && self.exterior_surface_temps == cache.ext_temps_warm_start.as_slice()
+            && cache.identity.matches(env)
+    }
+
     /// Clears the shared ideal-capacity solve prefix: the caller is about to
     /// change (or has changed) the step's `x` or `last_u` that the prefix was
     /// computed from, so a cached prefix would be stale. Called by every
@@ -1538,6 +1828,12 @@ impl ThermalSolver {
     /// contributions. Updates `self.component_gains` for diagnostics.
     /// Populates `self.infiltration_buf` with per-zone coupling terms.
     ///
+    /// `capture_env` marks the prepare phase's call: that call always
+    /// evaluates the environment half and stages the capture for the same
+    /// step's integrate build (which passes `false` and adopts the capture
+    /// when the reuse check passes). See `env_cache_valid` for the capture's
+    /// validity window and its invalidation events.
+    ///
     /// Returns `(u, latent_by_zone)` where the infiltration couplings are
     /// stored in `self.infiltration_buf` for semi-implicit coupling wiring.
     /// Run-path checks surfaced here (air density screen) are unconditional
@@ -1546,6 +1842,7 @@ impl ThermalSolver {
         &mut self,
         ports: &PortSlots,
         env: &EnvironmentState,
+        capture_env: bool,
     ) -> std::result::Result<(DVector<f64>, HashMap<ZoneId, f64>), HaresError> {
         let mut u = std::mem::replace(&mut self.u_buf, DVector::zeros(0));
         let n = self.model.input_dim();
@@ -1555,37 +1852,101 @@ impl ThermalSolver {
             u = DVector::zeros(n);
         }
 
-        self.apply_outdoor_inputs(&mut u, env);
-        self.refresh_solar_slot_map(env);
+        // ── Environment half ─────────────────────────────────────────────
+        //
+        // Outdoor columns, solar distribution, exterior solar, exterior
+        // longwave with the skin fixed point. Port-independent, and, with
+        // the exterior warm start restored, a deterministic function of (env,
+        // x): the prepare phase evaluates it once, captures it, and the same
+        // step's integrate phase adopts the capture instead of re-evaluating
+        // identical work from an identical warm start. The adoption installs
+        // the capture's converged skin fixed point, so the warm start the
+        // next step reads is the fresh path's exactly.
+        //
+        // The interior-longwave pass (ScriptF) and every port- and
+        // airflow-dependent pass below are NOT captured: the interior
+        // fixed point legitimately advances on each pass (the warm start
+        // the next pass reads), and the ports change between the phases.
+        // They run fresh on every build, in both phases.
+        let reuse = self.env_cache_valid && self.env_cache_reusable(env);
+        let window_solar;
+        let opaque_solar_w;
+        let exterior_lwr_w;
+        if reuse {
+            // Adopt the capture: the environment contribution to `u`, the
+            // converged skin fixed point, and the half's diagnostics. The
+            // half's persistent caches (the outdoor/ground temperatures,
+            // the solar slot map, the linearised exterior-LWR coupling)
+            // still hold the capture's values: nothing between the two
+            // builds disturbs them, and a miss refills them.
+            u.copy_from_slice(self.env_cache.env_u.as_slice());
+            self.exterior_surface_temps
+                .copy_from_slice(&self.env_cache.ext_temps_fixed_point);
+            window_solar = config::WindowSolarTotals {
+                injected_w: self.env_cache.window_solar_injected_w,
+                through_glass_w: self.env_cache.window_through_glass_w,
+            };
+            opaque_solar_w = self.env_cache.opaque_solar_w;
+            exterior_lwr_w = self.env_cache.exterior_lwr_w;
+            #[cfg(feature = "observe")]
+            {
+                self.skin_iteration_cap_exits = self.env_cache.skin_iteration_cap_exits;
+                self.max_skin_residual_k = self.env_cache.max_skin_residual_k;
+            }
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            {
+                self.ext_surface_diag_buf
+                    .clone_from(&self.env_cache.ext_surface_diag);
+                self.window_solar_diag_buf
+                    .clone_from(&self.env_cache.window_solar_diag);
+            }
+            self.env_cache_valid = false;
+        } else {
+            self.env_cache_valid = false;
+            // Counted once per evaluation: an ordinary step evaluates the
+            // half once (the prepare capture) and the integrate build
+            // reuses it; the count is the deduplication's instrument. The
+            // debug breakdown path re-derives the same passes by hand and
+            // deliberately does not count: it is not a step's evaluation.
+            self.environment_evaluations += 1;
+            if capture_env {
+                self.stage_env_cache(env);
+            }
+            self.apply_outdoor_inputs(&mut u, env);
+            self.refresh_solar_slot_map(env);
 
-        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-        self.window_solar_diag_buf.clear();
-        let window_solar = self.apply_solar_inputs(&mut u, env);
-        let window_solar_w = window_solar.injected_w;
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            self.window_solar_diag_buf.clear();
+            window_solar = self.apply_solar_inputs(&mut u, env);
 
-        // Absorbed opaque exterior solar [W], both application paths. The
-        // non-iterative path injects the full absorbed flux (returned
-        // directly); the iterative path (rad_frac > 0) injects only the
-        // rad_frac-scaled share, so its full absorbed flux is accumulated
-        // per surface during the iterative solve below.
-        let opaque_solar_noniter_w = self.apply_exterior_solar_inputs(&mut u, env);
-        #[cfg(any(debug_assertions, feature = "observe_detailed"))]
-        self.ext_surface_diag_buf.clear();
-        // Also accumulates `opaque_exterior_solar_w` (iterative-path absorbed
-        // solar) and `opaque_exterior_lwr_w` (net skin LWR, both paths).
-        self.apply_exterior_longwave_inputs_iterative(&mut u, env)?;
-        let opaque_solar_w = opaque_solar_noniter_w + self.opaque_exterior_solar_w;
-        // Net exterior LWR at the opaque skins [W], both paths. Neither `u`
-        // delta isolates it: the iterative injection mixes solar and LWR at
-        // the rad_frac scale, and the non-iterative flux bypasses `u`
-        // entirely (semi-implicit coupling).
-        let exterior_lwr_w = self.opaque_exterior_lwr_w;
+            // Absorbed opaque exterior solar [W], both application paths. The
+            // non-iterative path injects the full absorbed flux (returned
+            // directly); the iterative path (rad_frac > 0) injects only the
+            // rad_frac-scaled share, so its full absorbed flux is accumulated
+            // per surface during the iterative solve below.
+            let opaque_solar_noniter_w = self.apply_exterior_solar_inputs(&mut u, env);
+            #[cfg(any(debug_assertions, feature = "observe_detailed"))]
+            self.ext_surface_diag_buf.clear();
+            // Also accumulates `opaque_exterior_solar_w` (iterative-path absorbed
+            // solar) and `opaque_exterior_lwr_w` (net skin LWR, both paths).
+            self.apply_exterior_longwave_inputs_iterative(&mut u, env)?;
+            opaque_solar_w = opaque_solar_noniter_w + self.opaque_exterior_solar_w;
+            // Net exterior LWR at the opaque skins [W], both paths. Neither `u`
+            // delta isolates it: the iterative injection mixes solar and LWR at
+            // the rad_frac scale, and the non-iterative flux bypasses `u`
+            // entirely (semi-implicit coupling).
+            exterior_lwr_w = self.opaque_exterior_lwr_w;
+            if capture_env {
+                self.complete_env_cache(&u, window_solar, opaque_solar_w, exterior_lwr_w);
+            }
+        }
         // Combined absorbed gross at the opaque exterior skins — OCHRE's
         // "{boundary} Ext. Solar Gain (W)" + "{boundary} Ext. LWR Gain (W)"
         // semantics (skin-absorbed flux, not the injected fraction). Windows
-        // are excluded: their solar is `window_solar_w` and their exterior
-        // LWR `window_exterior_lwr_w`.
+        // are excluded: their solar is the window solar pass's and their
+        // exterior LWR `window_exterior_lwr_w`.
         let opaque_solar_lwr_w = opaque_solar_w + exterior_lwr_w;
+        let window_solar_w = window_solar.injected_w;
 
         #[cfg(any(debug_assertions, feature = "observe_detailed"))]
         self.int_surface_diag_buf.clear();
@@ -9445,5 +9806,762 @@ mod tests {
             );
             assert_eq!(solver.solve_tail_calls, 1);
         }
+    }
+
+    /// A solver shaped like the standing step bench, at test scale: one
+    /// zone, one iterative-path exterior wall, one linearized-path slab to
+    /// ground, one window on the sky-correction branch, a ground depth, and
+    /// solar irradiance on every exterior surface. The environment half
+    /// runs every pass of it, so the input-build reuse witnesses exercise
+    /// the real hot path.
+    fn env_cache_solver(env: &EnvironmentState) -> ThermalSolver {
+        use crate::thermal_solver::WindowSolarProperties;
+
+        let n_states = 3usize;
+        let n_inputs = 6usize;
+        let c_zone = 360_000.0;
+        let c_node = 900_000.0;
+        let mut a_c = DMatrix::zeros(n_states, n_states);
+        let mut b_c = DMatrix::zeros(n_states, n_inputs);
+        // Zone air: window UA to outdoor, wall and slab couplings.
+        a_c[(0, 0)] = -(3.0 + 4.0 + 5.0) / c_zone;
+        a_c[(0, 1)] = 3.0 / c_zone;
+        a_c[(0, 2)] = 4.0 / c_zone;
+        b_c[(0, 0)] = 5.0 / c_zone;
+        b_c[(0, 5)] = 1.0 / c_zone;
+        // Wall node: exterior film + zone coupling, injection column 2.
+        a_c[(1, 1)] = -(3.0 + 3.0) / c_node;
+        a_c[(1, 0)] = 3.0 / c_node;
+        b_c[(1, 0)] = 3.0 / c_node;
+        b_c[(1, 2)] = 1.0 / c_node;
+        // Slab node: zone coupling + ground column, injection column 3.
+        a_c[(2, 2)] = -(4.0 + 2.0) / (2.0 * c_node);
+        a_c[(2, 0)] = 4.0 / (2.0 * c_node);
+        b_c[(2, 1)] = 2.0 / (2.0 * c_node);
+        b_c[(0, 2)] = 0.0;
+
+        let mapping = OutputMapping {
+            output_count: 1,
+            node_to_output: vec![(0, 0, 1.0)],
+            input_to_output: vec![],
+        };
+        let model = StateSpaceModel::from_continuous(&a_c, &b_c, 60.0, &mapping).unwrap();
+
+        let wiring = StateSpaceWiring {
+            zone_state_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_output_indices: HashMap::from([(ZoneId(1), 0)]),
+            zone_sensible_input_indices: HashMap::from([(ZoneId(1), 5)]),
+            outdoor_temp_input_indices: vec![0],
+            ground_temp_input_indices: vec![1],
+            ground_temp_input_depths_m: vec![0.5],
+            solar_input_indices: HashMap::from([(20_u32, 4_usize)]),
+            c_zone_j_k: HashMap::from([(ZoneId(1), c_zone)]),
+            ..Default::default()
+        };
+
+        let (transmittance, radiation_frac) =
+            hares_physics::solar::calculate_window_parameters(0.4, 1.8, 0.01);
+        let window = WindowSolarProperties {
+            shgc: 0.4,
+            winter_shgc: 0.4,
+            u_factor_w_m2_k: 1.8,
+            area_m2: 8.0,
+            transmittance,
+            winter_transmittance: transmittance,
+            radiation_frac,
+            glazing_curve: hares_physics::solar::GlazingCurve::from_u_shgc(1.8, 0.4),
+            tilt_deg: 90.0,
+            azimuth_deg: 180.0,
+        };
+
+        let r_film = 0.04;
+        let r_half = 0.10;
+        let config = ThermalSolverConfig {
+            indoor_zone_id: ZoneId(1),
+            window_properties: HashMap::from([(20_u32, window)]),
+            window_zone_ids: HashMap::from([(20_u32, ZoneId(1))]),
+            window_ids_sorted: vec![20_u32],
+            exterior_surfaces: vec![
+                ExteriorSurfaceInfo {
+                    surface_id: 10,
+                    state_index: 1,
+                    input_index: 2,
+                    area_m2: 40.0,
+                    emissivity: 0.9,
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: r_film / (r_film + r_half),
+                    rad_res_k_w: (r_film * r_half / (r_film + r_half)) / 40.0,
+                    n_iter: 4,
+                    absorptance: 0.7,
+                    boundary_category: Some(BoundaryCategory::Wall),
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 25.0,
+                },
+                ExteriorSurfaceInfo {
+                    surface_id: 20,
+                    state_index: 0,
+                    input_index: 5,
+                    area_m2: 8.0,
+                    emissivity: 0.84,
+                    tilt_deg: 90.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 4,
+                    absorptance: 0.0,
+                    boundary_category: Some(BoundaryCategory::Window),
+                    u_factor_w_m2_k: 2.5,
+                    h_out_w_m2_k: 25.0,
+                },
+                ExteriorSurfaceInfo {
+                    surface_id: 30,
+                    state_index: 2,
+                    input_index: 3,
+                    area_m2: 48.0,
+                    emissivity: 0.9,
+                    tilt_deg: 180.0,
+                    azimuth_deg: 180.0,
+                    rad_frac: 0.0,
+                    rad_res_k_w: 0.0,
+                    n_iter: 4,
+                    absorptance: 0.0,
+                    boundary_category: Some(BoundaryCategory::Floor),
+                    u_factor_w_m2_k: 0.0,
+                    h_out_w_m2_k: 25.0,
+                },
+            ],
+            ..ThermalSolverConfig::new(ZoneId(1))
+        };
+        let mut solver =
+            ThermalSolver::new(model, wiring, config, 60.0, env, env.zones[0].temperature_c)
+                .expect("env cache witness solver");
+        solver.x[0] = env.zones[0].temperature_c;
+        solver
+    }
+
+    fn env_cache_env() -> EnvironmentState {
+        let mut env = env_for_temp(24.0, 5.0);
+        env.weather.sky_temp_c = -5.0;
+        env.weather.ground_temp_c = 10.0;
+        env.weather.solar_irradiance = vec![
+            SurfaceIrradiance {
+                surface_id: 10,
+                direct_w_m2: 300.0,
+                diffuse_w_m2: 100.0,
+                reflected_w_m2: 40.0,
+                angle_of_incidence_rad: 0.9,
+            },
+            SurfaceIrradiance {
+                surface_id: 20,
+                direct_w_m2: 250.0,
+                diffuse_w_m2: 110.0,
+                reflected_w_m2: 60.0,
+                angle_of_incidence_rad: 0.7,
+            },
+            SurfaceIrradiance {
+                surface_id: 30,
+                direct_w_m2: 0.0,
+                diffuse_w_m2: 120.0,
+                reflected_w_m2: 30.0,
+                angle_of_incidence_rad: 0.0,
+            },
+        ];
+        env
+    }
+
+    /// The environment-half evaluation is once per ordinary step, not once
+    /// per build: the prepare phase's build evaluates the environment half
+    /// and the integrate phase reuses that evaluation (the environment it
+    /// reads and the thermal state it reads are unchanged between the two
+    /// builds), so one `resolve` step advances the counter by exactly one.
+    #[test]
+    fn environment_evaluation_is_once_per_ordinary_step() {
+        let env = env_cache_env();
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut solver = env_cache_solver(&env);
+
+        // Warm the skin fixed points; the steady-state path is the contract.
+        for _ in 0..5 {
+            solver
+                .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+                .unwrap();
+        }
+        let before = solver.environment_evaluations();
+        solver
+            .resolve_new(&ports, &env, std::time::Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            solver.environment_evaluations() - before,
+            1,
+            "an ordinary step evaluates the environment half once"
+        );
+    }
+
+    // ── The environment-half reuse: equivalence and invalidation witnesses ──
+
+    /// One step's observed state for the reuse equivalence comparison: the
+    /// bit patterns of every quantity the step computes or carries (the
+    /// input vector, the state, the exterior fixed point, the ground
+    /// temperatures, the couplings), the typed update, and the diagnostic
+    /// struct's rendering. Bit patterns, not floats: the comparison is
+    /// bitwise, so any semantic delta is visible.
+    struct CacheStepRecord {
+        last_u_bits: Vec<u64>,
+        x_bits: Vec<u64>,
+        ext_temps_bits: Vec<u64>,
+        ground_temps_bits: Vec<u64>,
+        last_coupling_bits: Vec<(usize, u64, u64)>,
+        update: DomainUpdate,
+        gains_debug: String,
+    }
+
+    /// The trajectory's cache mode.
+    #[derive(Clone, Copy)]
+    enum CacheMode {
+        /// The prepare capture stands; the integrate build adopts it when
+        /// the reuse check passes. The shipped behavior.
+        Adopt,
+        /// The capture is dropped after the prepare build, so the integrate
+        /// build re-evaluates the environment half fresh: the pre-reuse
+        /// behavior, the equivalence comparison's reference.
+        Defeated,
+    }
+
+    fn record_cache_step(solver: &ThermalSolver, update: &DomainUpdate) -> CacheStepRecord {
+        CacheStepRecord {
+            last_u_bits: solver.last_u.iter().map(|v| v.to_bits()).collect(),
+            x_bits: solver.x.iter().map(|v| v.to_bits()).collect(),
+            ext_temps_bits: solver
+                .exterior_surface_temps
+                .iter()
+                .map(|v| v.to_bits())
+                .collect(),
+            ground_temps_bits: solver
+                .cached_ground_temps_c
+                .iter()
+                .map(|v| v.to_bits())
+                .collect(),
+            last_coupling_bits: solver
+                .last_coupling
+                .iter()
+                .map(|(idx, d, f)| (*idx, d.to_bits(), f.to_bits()))
+                .collect(),
+            update: update.clone(),
+            gains_debug: format!("{:?}", solver.component_gains),
+        }
+    }
+
+    fn assert_trajectories_bitwise_identical(
+        adopted: &[CacheStepRecord],
+        fresh: &[CacheStepRecord],
+    ) {
+        assert_eq!(adopted.len(), fresh.len(), "the trajectories' step counts");
+        for (step, (a, f)) in adopted.iter().zip(fresh.iter()).enumerate() {
+            assert_eq!(
+                a.last_u_bits, f.last_u_bits,
+                "step {step}: the input vector's bits differ under the reuse"
+            );
+            assert_eq!(
+                a.x_bits, f.x_bits,
+                "step {step}: the state vector's bits differ under the reuse"
+            );
+            assert_eq!(
+                a.ext_temps_bits, f.ext_temps_bits,
+                "step {step}: the exterior fixed point's bits differ under the reuse"
+            );
+            assert_eq!(
+                a.ground_temps_bits, f.ground_temps_bits,
+                "step {step}: the cached ground temperatures' bits differ under the reuse"
+            );
+            assert_eq!(
+                a.last_coupling_bits, f.last_coupling_bits,
+                "step {step}: the coupling tuples' bits differ under the reuse"
+            );
+            assert_eq!(
+                a.update, f.update,
+                "step {step}: the DomainUpdate differs under the reuse"
+            );
+            assert_eq!(
+                a.gains_debug, f.gains_debug,
+                "step {step}: the component diagnostics differ under the reuse"
+            );
+        }
+    }
+
+    /// Runs a two-phase trajectory whose per-step environment and ports
+    /// vary (drifting weather, a marching clock, alternating gains), in the
+    /// given cache mode. `on_step` applies the scenario's own per-step
+    /// variation before the prepare build; the runner applies the
+    /// between-steps shape every scenario shares.
+    fn run_cache_trajectory(
+        make_solver: impl Fn(&EnvironmentState) -> ThermalSolver,
+        mode: CacheMode,
+        steps: usize,
+        mut on_step: impl FnMut(usize, &mut EnvironmentState, &mut PortSlots),
+    ) -> Vec<CacheStepRecord> {
+        let mut env = env_cache_env();
+        let mut solver = make_solver(&env);
+        let mut records = Vec::new();
+        for step in 0..steps {
+            env.weather.outdoor_temp_c = 5.0 + (step % 8) as f64;
+            env.weather.sky_temp_c = env.weather.outdoor_temp_c - 8.0;
+            env.current_time += chrono::Duration::seconds(60);
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            ports.thermal[0].sensible_gain_w = 50.0 * (step % 3) as f64;
+            on_step(step, &mut env, &mut ports);
+            solver.prepare_inputs(&ports, &env).unwrap();
+            if matches!(mode, CacheMode::Defeated) {
+                solver.env_cache_valid = false;
+            }
+            let mut out = DomainUpdate::empty(hares_types::THERMAL);
+            solver.integrate(&ports, &env, &mut out).unwrap();
+            records.push(record_cache_step(&solver, &out));
+            // The dwelling's between-steps update: the committed zone
+            // temperature becomes the next step's environment state.
+            env.zones[0].temperature_c = out.zone_temperatures_c[0].1;
+        }
+        records
+    }
+
+    /// The reuse is semantically transparent: with the cache adopted, a
+    /// multi-step trajectory under drifting weather, a marching clock and
+    /// alternating ports produces the same bit patterns in every quantity
+    /// the step computes or carries as the same trajectory with the capture
+    /// dropped and the environment half re-evaluated fresh every build.
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_star_mesh() {
+        let fresh = run_cache_trajectory(env_cache_solver, CacheMode::Defeated, 12, |_, _, _| {});
+        let adopted = run_cache_trajectory(env_cache_solver, CacheMode::Adopt, 12, |_, _, _| {});
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// A ScriptF-mode solver: the standing witness topology plus an interior
+    /// two-surface zone with precomputed ScriptF factors, the interior LWR
+    /// method selected. The interior pass is deliberately NOT part of the
+    /// reuse (its fixed point advances on every pass), so this scenario
+    /// proves the capture's boundary: the interior pass still runs on both
+    /// builds and the trajectory is still bitwise the fresh path's.
+    fn scriptf_cache_solver(env: &EnvironmentState) -> ThermalSolver {
+        let mut solver = env_cache_solver(env);
+        let mut zone = InteriorLwrZoneConfig {
+            zone_id: ZoneId(1),
+            surfaces: vec![
+                InteriorSurfaceInfo {
+                    state_index: 1,
+                    input_index: 2,
+                    area_m2: 12.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
+                    emissivity: 0.90,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 250.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+                InteriorSurfaceInfo {
+                    state_index: 2,
+                    input_index: 3,
+                    area_m2: 8.0,
+                    azimuth_deg: 0.0,
+                    tilt_deg: 90.0,
+                    emissivity: 0.65,
+                    radiation_frac: 1.0,
+                    rad_res_k_w: 175.0,
+                    solar_absorptance: 0.0,
+                    is_floor: false,
+                    driving_temp: None,
+                },
+            ],
+            scriptf: None,
+        };
+        zone.compute_scriptf();
+        solver.config.interior_lwr_zones = vec![zone];
+        solver.config.interior_lwr_method = crate::boundary_rc::InteriorLwrMethod::ScriptF;
+        // The interior warm starts sized to the zone's surface list: the
+        // constructor sized them against the config the solver was built
+        // with, which carried no interior zones.
+        solver.interior_surface_temps = vec![vec![env.zones[0].temperature_c; 2]];
+        solver.interior_surface_prev_temps = vec![vec![env.zones[0].temperature_c; 2]];
+        solver
+    }
+
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_script_f() {
+        let fresh =
+            run_cache_trajectory(scriptf_cache_solver, CacheMode::Defeated, 12, |_, _, _| {});
+        let adopted =
+            run_cache_trajectory(scriptf_cache_solver, CacheMode::Adopt, 12, |_, _, _| {});
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// The scheduled-ventilation variants: the flow schedule's read selects
+    /// the discretization variant per step, alternating fan-on and fan-off
+    /// hours. The airflow terms are not part of the reuse (they read the
+    /// ports), so the trajectory proves the capture coexists with the
+    /// variant selection and stays bitwise the fresh path's.
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_scheduled_ventilation() {
+        let flow_m3_s = 0.4731_f64;
+        let fresh = run_cache_trajectory(
+            |env| flow_variant_solver(env, &[flow_m3_s]),
+            CacheMode::Defeated,
+            12,
+            |step, env, _| {
+                let payload = env.domains.schedule.payload_mut();
+                payload.clear();
+                payload.push(if step % 2 == 0 { flow_m3_s } else { 0.0 });
+            },
+        );
+        let adopted = run_cache_trajectory(
+            |env| flow_variant_solver(env, &[flow_m3_s]),
+            CacheMode::Adopt,
+            12,
+            |step, env, _| {
+                let payload = env.domains.schedule.payload_mut();
+                payload.clear();
+                payload.push(if step % 2 == 0 { flow_m3_s } else { 0.0 });
+            },
+        );
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// The ideal-capacity dispatch: the target solve runs between the
+    /// phases (its shared prefix filled from the prepare build's last_u),
+    /// and the solved capacity is deposited into the ports the integrate
+    /// build reads. The trajectory proves the capture survives the solve
+    /// and the deposited ports reach the integration, bitwise the fresh
+    /// path's. The deposit is phase-ordered (the solve runs between the
+    /// builds), so the arms run by hand instead of through the generic
+    /// runner.
+    #[test]
+    fn adopted_cache_reproduces_the_fresh_build_bitwise_ideal_capacity() {
+        let run = |mode: CacheMode| -> Vec<CacheStepRecord> {
+            let mut env = env_cache_env();
+            let mut solver = env_cache_solver(&env);
+            let mut records = Vec::new();
+            for step in 0..12 {
+                env.weather.outdoor_temp_c = 5.0 + (step % 8) as f64;
+                env.weather.sky_temp_c = env.weather.outdoor_temp_c - 8.0;
+                env.current_time += chrono::Duration::seconds(60);
+                let mut ports = PortSlots {
+                    thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                    ..Default::default()
+                };
+                solver.prepare_inputs(&ports, &env).unwrap();
+                if matches!(mode, CacheMode::Defeated) {
+                    solver.env_cache_valid = false;
+                }
+                // The dispatch: the ideal solve against the prepare build's
+                // inputs, the capacity deposited into the ports.
+                let target = 21.0 + 0.1 * (step % 4) as f64;
+                let capacity = solver.solve_ideal_capacity_for_target(ZoneId(1), target);
+                ports.thermal[0].sensible_gain_w = capacity;
+                let mut out = DomainUpdate::empty(hares_types::THERMAL);
+                solver.integrate(&ports, &env, &mut out).unwrap();
+                records.push(record_cache_step(&solver, &out));
+                env.zones[0].temperature_c = out.zone_temperatures_c[0].1;
+            }
+            records
+        };
+        let fresh = run(CacheMode::Defeated);
+        let adopted = run(CacheMode::Adopt);
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+    }
+
+    /// The checkpoint/restore control: a mid-run checkpoint written after an
+    /// ordinary step, restored into a fresh solver, and the continued
+    /// trajectory compared bitwise against the uninterrupted one. The
+    /// restore clears the capture, so the restored solver's next step
+    /// re-evaluates the environment half fresh and lands on the same bits.
+    #[test]
+    fn adopted_cache_checkpoint_restore_control_is_bitwise() {
+        let run_until = |mode: CacheMode, restore: Option<usize>| -> Vec<CacheStepRecord> {
+            let mut env = env_cache_env();
+            let mut solver = env_cache_solver(&env);
+            let mut records = Vec::new();
+            let mut snapshot = None;
+            for step in 0..12 {
+                if Some(step) == restore {
+                    let snap = snapshot.take().expect("checkpoint written");
+                    solver.restore_state(&snap).unwrap();
+                }
+                env.weather.outdoor_temp_c = 5.0 + (step % 8) as f64;
+                env.weather.sky_temp_c = env.weather.outdoor_temp_c - 8.0;
+                env.current_time += chrono::Duration::seconds(60);
+                let ports = PortSlots {
+                    thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                    ..Default::default()
+                };
+                solver.prepare_inputs(&ports, &env).unwrap();
+                if matches!(mode, CacheMode::Defeated) {
+                    solver.env_cache_valid = false;
+                }
+                let mut out = DomainUpdate::empty(hares_types::THERMAL);
+                solver.integrate(&ports, &env, &mut out).unwrap();
+                records.push(record_cache_step(&solver, &out));
+                env.zones[0].temperature_c = out.zone_temperatures_c[0].1;
+                if step == 4 {
+                    snapshot = Some(solver.snapshot_state());
+                }
+            }
+            records
+        };
+        // The uninterrupted adopted trajectory is the fresh trajectory's.
+        let fresh = run_until(CacheMode::Defeated, None);
+        let adopted = run_until(CacheMode::Adopt, None);
+        assert_trajectories_bitwise_identical(&adopted, &fresh);
+        // The restore control: the adopted trajectory with a mid-run
+        // restore is bitwise the same restore sequence run with the capture
+        // dropped: the restore rolls the state back (its step 6 re-lives
+        // the checkpoint's state, not the uninterrupted step 6's), so the
+        // comparison is against the same sequence, not the uninterrupted
+        // one.
+        let restored_adopted = run_until(CacheMode::Adopt, Some(6));
+        let restored_fresh = run_until(CacheMode::Defeated, Some(6));
+        assert_trajectories_bitwise_identical(&restored_adopted, &restored_fresh);
+    }
+
+    /// An invalidation event's rebuild produces the fresh path's bits, and
+    /// the step that contains the event evaluates the environment half
+    /// twice: the capture is dropped and the integrate build re-evaluates.
+    /// `event` runs between the phases; `reference_event` runs on the
+    /// reference arm where the capture is defeated anyway, so both arms
+    /// apply the same state change at the same point.
+    fn assert_event_rebuilds(
+        mut event: impl FnMut(&mut ThermalSolver, &mut EnvironmentState, &mut PortSlots),
+        mut reference_event: impl FnMut(&mut ThermalSolver, &mut EnvironmentState, &mut PortSlots),
+        label: &'static str,
+    ) {
+        let mut run = |defeat: bool| -> (CacheStepRecord, u64) {
+            let mut env = env_cache_env();
+            let mut solver = env_cache_solver(&env);
+            // Warm the skin fixed points: the steady-state path is the
+            // contract.
+            for _ in 0..5 {
+                solver
+                    .resolve_new(
+                        &PortSlots {
+                            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                            ..Default::default()
+                        },
+                        &env,
+                        std::time::Duration::from_secs(60),
+                    )
+                    .unwrap();
+            }
+            let count_before = solver.environment_evaluations();
+            let mut ports = PortSlots {
+                thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+                ..Default::default()
+            };
+            solver.prepare_inputs(&ports, &env).unwrap();
+            if defeat {
+                solver.env_cache_valid = false;
+            }
+            event(&mut solver, &mut env, &mut ports);
+            reference_event(&mut solver, &mut env, &mut ports);
+            let mut out = DomainUpdate::empty(hares_types::THERMAL);
+            solver.integrate(&ports, &env, &mut out).unwrap();
+            let record = record_cache_step(&solver, &out);
+            (record, solver.environment_evaluations() - count_before)
+        };
+        // The reference arm: the capture defeated AND the event applied, so
+        // the compare isolates the reuse, not the event.
+        let (fresh, fresh_count) = run(true);
+        let (adopted, adopted_count) = run(false);
+        assert_eq!(
+            adopted.last_u_bits, fresh.last_u_bits,
+            "{label}: the rebuilt step's input vector is not the fresh path's bits"
+        );
+        assert_eq!(adopted.x_bits, fresh.x_bits, "{label}: state bits");
+        assert_eq!(
+            adopted.ext_temps_bits, fresh.ext_temps_bits,
+            "{label}: exterior fixed point bits"
+        );
+        assert_eq!(
+            adopted.ground_temps_bits, fresh.ground_temps_bits,
+            "{label}: ground temperature bits"
+        );
+        assert_eq!(
+            adopted.last_coupling_bits, fresh.last_coupling_bits,
+            "{label}: coupling bits"
+        );
+        assert_eq!(adopted.update, fresh.update, "{label}: DomainUpdate");
+        assert_eq!(
+            adopted.gains_debug, fresh.gains_debug,
+            "{label}: component diagnostics"
+        );
+        assert_eq!(
+            adopted_count, 2,
+            "{label}: the invalidation event must rebuild (two evaluations in the step)"
+        );
+        assert_eq!(fresh_count, 2, "{label}: the reference arm's own count");
+    }
+
+    /// A solar override between the phases: the irradiance the environment
+    /// half reads changes, so the reuse must drop and the integrate build
+    /// must see the new sun.
+    #[test]
+    fn a_solar_override_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, env, _| {
+                env.weather.solar_irradiance[0].direct_w_m2 = 850.0;
+                env.weather.solar_irradiance[1].direct_w_m2 = 400.0;
+                let _ = solver;
+            },
+            |_, _, _| {},
+            "solar override",
+        );
+    }
+
+    /// An exterior-surface fixed-point update between the phases: the warm
+    /// start the capture's iteration ran from changes, so the reuse must
+    /// drop and the integrate build must iterate from the updated skin.
+    #[test]
+    fn an_exterior_fixed_point_update_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, _, _| {
+                solver.exterior_surface_temps[0] = 41.3;
+            },
+            |_, _, _| {},
+            "exterior fixed-point update",
+        );
+    }
+
+    /// A restore between the phases: `restore_state` clears the capture,
+    /// so the integrate build re-evaluates. The restore here is
+    /// content-neutral (the solver's own post-prepare state written back),
+    /// which isolates the clearing: the reuse check itself would pass on
+    /// this state, so the rebuild proves the restore's invalidation fired.
+    #[test]
+    fn a_restore_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, _, _| {
+                let snap = solver.snapshot_state();
+                solver.restore_state(&snap).unwrap();
+            },
+            |_, _, _| {},
+            "restore",
+        );
+    }
+
+    /// A schedule/environment identity change between the phases: the clock
+    /// and the schedule row move, so the reuse must drop.
+    #[test]
+    fn a_schedule_or_environment_identity_change_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |_, env, _| {
+                env.current_time += chrono::Duration::seconds(60);
+                env.schedule_row = Some(7);
+            },
+            |_, _, _| {},
+            "schedule/environment identity change",
+        );
+    }
+
+    /// A thermal state change between the phases: the state vector the
+    /// environment half read changes, so the reuse must drop.
+    #[test]
+    fn a_thermal_state_change_between_phases_rebuilds() {
+        assert_event_rebuilds(
+            |solver, _, _| {
+                solver.x[1] = 31.5;
+            },
+            |_, _, _| {},
+            "thermal state change",
+        );
+    }
+
+    /// A timestep change voids the capture's identity. The public integrate
+    /// rejects a changed timestep by its own dt assertion in debug builds;
+    /// the identity check is the release-build guard, so the witness runs
+    /// against the check directly.
+    #[test]
+    fn a_timestep_change_voids_the_capture_identity() {
+        let env = env_cache_env();
+        let mut solver = env_cache_solver(&env);
+        let ports = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        solver.prepare_inputs(&ports, &env).unwrap();
+        assert!(solver.env_cache_valid, "the prepare build stages a capture");
+        let mut env_changed = env.clone();
+        env_changed.time_res = chrono::Duration::seconds(120);
+        assert!(
+            !solver.env_cache_reusable(&env_changed),
+            "a timestep change must void the capture's identity"
+        );
+        assert!(
+            solver.env_cache_reusable(&env),
+            "the unchanged environment must keep the capture's identity"
+        );
+    }
+
+    /// The post-dispatch ports reach the integration exactly once through
+    /// the reuse: a two-phase step whose ports change between the phases is
+    /// bitwise the single-call resolve with the post-dispatch ports, and
+    /// the step still evaluated the environment half once.
+    #[test]
+    fn post_dispatch_ports_reach_the_integrated_vector_through_the_cache() {
+        let env = env_cache_env();
+        let ports_zero = PortSlots {
+            thermal: vec![ThermalAccumulator::new(ZoneId(1))],
+            ..Default::default()
+        };
+        let mut ports_hvac = ports_zero.clone();
+        ports_hvac.thermal[0].sensible_gain_w = 1000.0;
+        ports_hvac.thermal[0].radiant_gain_w = 300.0;
+        ports_hvac.thermal[0].shortwave_gain_w = 75.0;
+
+        // Two-phase with the dispatch between the phases (the cache adopted).
+        let mut solver = env_cache_solver(&env);
+        solver.prepare_inputs(&ports_zero, &env).unwrap();
+        let mut out_split = DomainUpdate::empty(hares_types::THERMAL);
+        solver.integrate(&ports_hvac, &env, &mut out_split).unwrap();
+
+        // Single call with the post-dispatch ports.
+        let mut solver_ref = env_cache_solver(&env);
+        let out_ref = solver_ref
+            .resolve_new(&ports_hvac, &env, std::time::Duration::from_secs(60))
+            .unwrap();
+
+        assert_eq!(
+            out_split, out_ref,
+            "the two-phase step with the dispatch between the phases must be \
+             bitwise the single-call resolve with the post-dispatch ports"
+        );
+        assert_eq!(
+            solver
+                .last_u
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            solver_ref
+                .last_u
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            "the rebuilt input vector's bits"
+        );
+        assert_eq!(
+            solver.x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            solver_ref.x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "the post-step state's bits"
+        );
+        assert_eq!(
+            format!("{:?}", solver.component_gains),
+            format!("{:?}", solver_ref.component_gains),
+            "the component diagnostics must carry the post-dispatch ports' \
+             contributions exactly once"
+        );
     }
 }

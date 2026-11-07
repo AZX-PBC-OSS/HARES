@@ -762,13 +762,27 @@ impl ThermalSolver {
     /// Phase 1: build input vector and coupling from current weather/solar/infiltration.
     /// Stores results in `last_u` and `last_coupling` so that
     /// `solve_ideal_capacity_for_target` sees current-step data.
-    /// Does NOT cache u for the integration step -- `integrate` rebuilds it from
-    /// post-dispatch ports.
+    ///
+    /// This phase's build evaluates the environment half (outdoor columns,
+    /// solar, exterior solar, exterior longwave with the skin fixed point)
+    /// and stages the capture for the same step's integrate phase to adopt:
+    /// the half reads only the environment, the state vector and the
+    /// exterior warm start, all unchanged between the two builds, so the
+    /// capture reproduces the work exactly and the integrate build skips
+    /// the re-evaluation. The capture's validity is exactly one step (see
+    /// `env_cache_valid`): a solar override, an exterior fixed-point
+    /// update, a restore, a timestep change, or any schedule/environment
+    /// identity change between the phases rebuilds.
     ///
     /// Zero allocation: the exterior surface temperatures are saved into and
     /// restored from `ext_temps_save_buf` with `copy_from_slice` (no per-step
     /// clone), and the latent map returned by `build_input_vector` goes back
     /// into `latent_buf` so its table is reused, not reallocated, next step.
+    /// The restore keeps this phase side-effect-free on the exterior warm
+    /// start: a checkpoint taken between the phases captures the pre-step
+    /// temperatures, and the reuse check verifies the warm start the capture
+    /// ran from. The converged fixed point itself travels in the capture and
+    /// the integrate phase installs it.
     pub(super) fn prepare_inputs_inner(
         &mut self,
         ports: &PortSlots,
@@ -783,7 +797,7 @@ impl ThermalSolver {
 
         self.ext_temps_save_buf
             .copy_from_slice(&self.exterior_surface_temps);
-        let (u, latent) = self.build_input_vector(ports, env)?;
+        let (u, latent) = self.build_input_vector(ports, env, true)?;
         self.exterior_surface_temps
             .copy_from_slice(&self.ext_temps_save_buf);
 
@@ -800,6 +814,13 @@ impl ThermalSolver {
     }
 
     /// Phase 2: rebuild u from post-dispatch ports, rebuild coupling, run ZOH integration.
+    ///
+    /// The build adopts the prepare phase's captured environment half when
+    /// the reuse check passes (one unchanged environment and thermal state
+    /// since the capture): the environment passes re-run only on a miss.
+    /// The post-dispatch port passes and the HVAC-dependent airflow terms
+    /// always run fresh here, exactly once per step: the capture never
+    /// substitutes for them.
     pub(super) fn integrate_inner(
         &mut self,
         ports: &PortSlots,
@@ -810,7 +831,7 @@ impl ThermalSolver {
         // any shared ideal-capacity prefix is stale.
         self.invalidate_shared_prefix();
 
-        let (u, latent_by_zone) = self.build_input_vector(ports, env)?;
+        let (u, latent_by_zone) = self.build_input_vector(ports, env, false)?;
 
         self.build_coupling();
 

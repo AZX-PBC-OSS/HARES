@@ -320,6 +320,10 @@ impl ThermalSolver {
         self.validate_snapshot(snap)?;
 
         self.invalidate_shared_prefix();
+        // The restored x, last_u and exterior warm start are not what the
+        // capture evaluated: the next build re-evaluates the environment
+        // half fresh.
+        self.env_cache_valid = false;
         self.active_flow_model = snap.active_flow_model;
         self.x.copy_from_slice(&snap.x);
         self.last_u.copy_from_slice(&snap.last_u);
