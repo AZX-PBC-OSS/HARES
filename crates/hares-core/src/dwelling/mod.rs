@@ -3,19 +3,19 @@
 mod autosize;
 pub mod blueprint;
 mod checkpointing;
-mod dispatcher;
 pub(crate) mod conversions;
+mod dispatcher;
 mod loop_allocator;
 mod premise_zip;
 mod recording;
 mod roster;
 mod solver_builder;
+mod step_pipeline;
 mod synthetic;
 #[cfg(test)]
 mod testing;
-mod step_pipeline;
-mod warnings;
 mod warmup;
+mod warnings;
 
 pub use warnings::{WarningLog, WarningLogSnapshot};
 
@@ -86,8 +86,8 @@ use hares_types::{
     ALL_FUEL_TYPES, BmsMode, ChargingStrategy, ControlSignal, DomainSolver, ElectricalSummary,
     EndUse, EnvironmentState, EquipmentId, ExecutionStage, GridState, HaresError, HealthEvent,
     OperatingMode, PortContribution, PortDeclaration, PortSlots, ScheduleSource,
-    ThermalAccumulator, ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole,
-    telemetry_keys as tk, validate_core_contract,
+    ThermalAccumulator, ThermalCategory, Warning, ZoneId, ZoneMap, ZoneRole, telemetry_keys as tk,
+    validate_core_contract,
 };
 use hares_types::{ControlCapabilities, CoreOutput, validate_port_core_electrical_consistency};
 use rand::SeedableRng;
@@ -1997,7 +1997,6 @@ fn forcing_horizon_steps(duration: Duration, time_res: StdDuration, warmup: bool
     }
     Ok(duration_steps.max(steps_per_day))
 }
-
 
 pub(crate) fn build_from_blueprint(bp: &Arc<DwellingBlueprint>) -> Result<Dwelling> {
     let mut warnings = WarningLog::new();
@@ -5299,7 +5298,6 @@ impl Dwelling {
     pub fn run_warmup_converged(&mut self, warmup: &hares_input::WarmupConfig) -> Result<u32> {
         WarmupRunner::run_converged(self, warmup)
     }
-
 
     /// Returns true if an actor interest was triggered by state changes
     /// between the previous step and the current step.

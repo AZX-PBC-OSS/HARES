@@ -6,9 +6,9 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT};
 #[cfg(feature = "observe")]
 use hares_control::PriorityTier;
+use hares_control::{DispatchRequest, DispatchTarget, PRIORITY_TIER_COUNT};
 use hares_equipment::Equipment;
 use hares_types::{ControlSignal, EndUse, ThermostatAxis};
 
@@ -553,7 +553,11 @@ impl EndUseReach {
 /// Whether a `ByEndUse(end_use)` target with `reach` addresses `eq`. A unit
 /// serving both setpoints relabels its end use by its mode, so the label
 /// alone reaches it only while it is in that mode.
-pub(super) fn addressed_by_end_use(eq: &dyn Equipment, end_use: &EndUse, reach: EndUseReach) -> bool {
+pub(super) fn addressed_by_end_use(
+    eq: &dyn Equipment,
+    end_use: &EndUse,
+    reach: EndUseReach,
+) -> bool {
     eq.descriptor().end_use == *end_use
         || (reach == EndUseReach::ThermostatAxis
             && ThermostatAxis::of_end_use(end_use)
@@ -602,8 +606,8 @@ pub(super) fn describe_target(target: &DispatchTarget) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::testing::TestEquipment;
+    use super::*;
     use hares_control::PriorityTier;
     use hares_types::{ControlCapabilities, telemetry_keys as tk};
 

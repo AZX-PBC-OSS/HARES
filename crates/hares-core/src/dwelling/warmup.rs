@@ -2,10 +2,10 @@
 //! first day's replay, the outcome writes on every return path, and the
 //! state-restored replay blocker the public entry records.
 
-use hares_types::{HealthEvent, HaresError, ZoneId};
+use hares_types::{HaresError, HealthEvent, ZoneId};
 
-use crate::health::{WarmupOutcome, WarmupResiduals};
 use super::{Dwelling, Result, StepResult, steps_per_day_exact};
+use crate::health::{WarmupOutcome, WarmupResiduals};
 
 /// The dwelling's warm-up convergence runner.
 ///
@@ -35,7 +35,10 @@ impl WarmupRunner {
     /// own warm-up runs through here (a caller's
     /// [`Dwelling::run_warmup_converged`] records the state-restored replay
     /// blocker first, the build's own warm-up records nothing).
-    pub(super) fn run_silent(dwelling: &mut Dwelling, warmup: &hares_input::WarmupConfig) -> Result<u32> {
+    pub(super) fn run_silent(
+        dwelling: &mut Dwelling,
+        warmup: &hares_input::WarmupConfig,
+    ) -> Result<u32> {
         let steps_per_day = steps_per_day_exact(dwelling.clock.time_res.num_milliseconds())?;
 
         dwelling.is_warming_up = true;
@@ -408,4 +411,3 @@ pub(crate) mod warmup_test_hooks {
         }
     }
 }
-

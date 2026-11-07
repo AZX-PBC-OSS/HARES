@@ -232,7 +232,8 @@ impl StepPipeline {
         // End of the `environment` phase: entry through Step 1a' (environment
         // update, queued control dispatch).
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Control);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Control);
 
         self.leg_scheduled_actors(d)?;
         // The `dispatch` phase opens here: the ActorDecide buffer drain, the
@@ -249,33 +250,36 @@ impl StepPipeline {
 
         self.leg_dispatch_and_derived(d)?;
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Equipment);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Equipment);
 
         self.leg_independent_equipment(d)?;
         self.leg_electrical_equipment(d)?;
         self.leg_thermal_equipment(d)?;
         // End of the `equipment` phase (Steps 3 and 3c).
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Envelope);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Envelope);
 
         self.leg_envelope_and_custom_solvers(d)?;
         // End of the `envelope` phase (Step 4 and its diagnostic capture);
         // the always-on invariant checks and check_step_invariants follow.
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Invariants);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Invariants);
 
         self.leg_invariants_and_state_snapshot(d, out)?;
         // End of the `state_snapshot` phase (observer push, diagnostic
         // accumulation, end-of-step equipment snapshot, step result).
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Output);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Output);
 
         self.leg_output_and_accounting(d, record_output, out)?;
         // Closes the `accounting` phase (billing, electrical summary, clock
         // advance) and records `step_total` from entry to return.
         #[cfg(feature = "profiling")]
         self.phase_clock.finish(&mut d.profiling);
-
 
         Ok(())
     }
@@ -369,8 +373,8 @@ impl StepPipeline {
         }
         #[cfg(feature = "observe")]
         {
-            self.obs_phases =
-                self.obs_slot
+            self.obs_phases = self
+                .obs_slot
                 .as_mut()
                 .map(|slot| std::mem::take(&mut slot.phases))
                 .unwrap_or_default();
@@ -390,8 +394,7 @@ impl StepPipeline {
         // carries no grid input (the same external rule as the voltage), so
         // a resumed run's first step reads the grid it is restored into.
         let prior_step_outage = d.latest_env.grid.grid_outage();
-        d.environment
-            .update_in_place(&mut d.latest_env, &d.clock)?;
+        d.environment.update_in_place(&mut d.latest_env, &d.clock)?;
 
         // The price pipeline's precedence rule (docs/PHYSICS_DECISIONS.md):
         // an explicitly applied price signal (the setter, the fleet's
@@ -563,7 +566,6 @@ impl StepPipeline {
     /// behind its interest filter).
     #[allow(clippy::too_many_lines)]
     fn leg_scheduled_actors(&mut self, d: &mut Dwelling) -> Result<()> {
-
         // Step 1b: deposit deterministic internal gains (occupancy, plug loads)
         // BEFORE prepare_inputs so the ideal solver sees them when computing
         // required HVAC capacity.
@@ -580,8 +582,7 @@ impl StepPipeline {
         }
 
         // Step 1d: build current-step inputs with all non-HVAC gains already on ports.
-        d.thermal_solver
-            .prepare_inputs(&d.ports, &d.latest_env)?;
+        d.thermal_solver.prepare_inputs(&d.ports, &d.latest_env)?;
 
         // Steps 1e to 1f: phase-ordered actor execution driven by the scheduler's
         // plan (explicit phase registration, within-phase priority ordering),
@@ -692,7 +693,8 @@ impl StepPipeline {
                         // nothing for it.
                         #[cfg(feature = "observe")]
                         if self.observing {
-                            self.scheduled_phases.push(format!("ActorDecide({})", entry.name));
+                            self.scheduled_phases
+                                .push(format!("ActorDecide({})", entry.name));
                         }
                         #[cfg(debug_assertions)]
                         {
@@ -880,7 +882,8 @@ impl StepPipeline {
         // End of the `dispatch` phase (Steps 2 and 2b); Step 2a re-runs
         // `update_control`, the second span of the `control` phase.
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Control);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Control);
 
         // Step 2a: re-run update_control for thermal equipment after control
         // dispatch so ThermalSetpoint / ModeOverride / DR signals take effect
@@ -899,7 +902,6 @@ impl StepPipeline {
     /// re-dispatches on same-step generation.
     #[allow(clippy::too_many_lines)]
     fn leg_independent_equipment(&mut self, d: &mut Dwelling) -> Result<()> {
-
         // Step 3: unified equipment step in stage_rank order
         // (Independent → Electrical → Thermal).
         //
@@ -988,10 +990,7 @@ impl StepPipeline {
         let stage_rank_alloc_before = thread_allocations();
         d.stepped_stage_ranks.clear();
         #[cfg(test)]
-        d.record_snapshot_allocations(
-            stage_rank_alloc_before,
-            SnapshotAllocSite::StageRankScratch,
-        );
+        d.record_snapshot_allocations(stage_rank_alloc_before, SnapshotAllocSite::StageRankScratch);
 
         // Phase 1: Independent-stage equipment (PV, generators).
         for _oi in 0..d.roster.equipment_execution_order.len() {
@@ -1059,8 +1058,7 @@ impl StepPipeline {
                     "equipment step executed"
                 );
                 if self.observing {
-                    let contribution =
-                        observer_capture::diff_ports(&d.port_snapshot_buf, &d.ports);
+                    let contribution = observer_capture::diff_ports(&d.port_snapshot_buf, &d.ports);
                     if self.nonthermal_obs_used < self.nonthermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
                             &mut self.nonthermal_obs[self.nonthermal_obs_used],
@@ -1069,11 +1067,13 @@ impl StepPipeline {
                             None,
                         );
                     } else {
-                        self.nonthermal_obs.push(observer_capture::capture_single_equipment(
-                            d.equipment[idx].as_ref(),
-                            contribution,
-                            pre_ports.expect("a fresh observation carries its pre-step capture"),
-                        ));
+                        self.nonthermal_obs
+                            .push(observer_capture::capture_single_equipment(
+                                d.equipment[idx].as_ref(),
+                                contribution,
+                                pre_ports
+                                    .expect("a fresh observation carries its pre-step capture"),
+                            ));
                     }
                     self.nonthermal_obs_used += 1;
                     #[cfg(test)]
@@ -1184,8 +1184,7 @@ impl StepPipeline {
                     "equipment step executed"
                 );
                 if self.observing {
-                    let contribution =
-                        observer_capture::diff_ports(&d.port_snapshot_buf, &d.ports);
+                    let contribution = observer_capture::diff_ports(&d.port_snapshot_buf, &d.ports);
                     if self.nonthermal_obs_used < self.nonthermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
                             &mut self.nonthermal_obs[self.nonthermal_obs_used],
@@ -1194,11 +1193,13 @@ impl StepPipeline {
                             None,
                         );
                     } else {
-                        self.nonthermal_obs.push(observer_capture::capture_single_equipment(
-                            d.equipment[idx].as_ref(),
-                            contribution,
-                            pre_ports.expect("a fresh observation carries its pre-step capture"),
-                        ));
+                        self.nonthermal_obs
+                            .push(observer_capture::capture_single_equipment(
+                                d.equipment[idx].as_ref(),
+                                contribution,
+                                pre_ports
+                                    .expect("a fresh observation carries its pre-step capture"),
+                            ));
                     }
                     self.nonthermal_obs_used += 1;
                     #[cfg(test)]
@@ -1288,8 +1289,7 @@ impl StepPipeline {
                     "equipment step executed"
                 );
                 if self.observing {
-                    let contribution =
-                        observer_capture::diff_ports(&d.port_snapshot_buf, &d.ports);
+                    let contribution = observer_capture::diff_ports(&d.port_snapshot_buf, &d.ports);
                     if self.thermal_obs_used < self.thermal_obs.len() {
                         observer_capture::capture_single_equipment_into(
                             &mut self.thermal_obs[self.thermal_obs_used],
@@ -1298,11 +1298,13 @@ impl StepPipeline {
                             None,
                         );
                     } else {
-                        self.thermal_obs.push(observer_capture::capture_single_equipment(
-                            d.equipment[idx].as_ref(),
-                            contribution,
-                            pre_ports.expect("a fresh observation carries its pre-step capture"),
-                        ));
+                        self.thermal_obs
+                            .push(observer_capture::capture_single_equipment(
+                                d.equipment[idx].as_ref(),
+                                contribution,
+                                pre_ports
+                                    .expect("a fresh observation carries its pre-step capture"),
+                            ));
                     }
                     self.thermal_obs_used += 1;
                     #[cfg(test)]
@@ -1550,13 +1552,9 @@ impl StepPipeline {
     /// observers' solver captures.
     #[allow(clippy::too_many_lines)]
     fn leg_envelope_and_custom_solvers(&mut self, d: &mut Dwelling) -> Result<()> {
-
         // Step 4: envelope/domain resolution.
-        d.thermal_solver.integrate(
-            &d.ports,
-            &d.latest_env,
-            &mut d.thermal_update_buf,
-        )?;
+        d.thermal_solver
+            .integrate(&d.ports, &d.latest_env, &mut d.thermal_update_buf)?;
 
         // Apply zone temps and capture observer data while we still have the borrow.
         apply_thermal_update_to_zones(&mut d.latest_env, &d.thermal_update_buf);
@@ -1567,10 +1565,7 @@ impl StepPipeline {
         // read it (humidity).
         #[cfg(test)]
         let thermal_alloc_before = thread_allocations();
-        d.latest_env
-            .domains
-            .thermal
-            .set_from(&d.thermal_update_buf);
+        d.latest_env.domains.thermal.set_from(&d.thermal_update_buf);
         #[cfg(test)]
         d.record_snapshot_allocations(thermal_alloc_before, SnapshotAllocSite::ThermalSetFrom);
 
@@ -1585,24 +1580,16 @@ impl StepPipeline {
                 .map(|(&z, &w)| (z, w)),
         );
 
-        d.humidity_solver.resolve(
-            &d.ports,
-            &d.latest_env,
-            self.dt,
-            &mut d.humidity_update_buf,
-        )?;
+        d.humidity_solver
+            .resolve(&d.ports, &d.latest_env, self.dt, &mut d.humidity_update_buf)?;
         d.electrical_solver.resolve(
             &d.ports,
             &d.latest_env,
             self.dt,
             &mut d.electrical_update_buf,
         )?;
-        d.fluid_solver.resolve(
-            &d.ports,
-            &d.latest_env,
-            self.dt,
-            &mut d.fluid_update_buf,
-        )?;
+        d.fluid_solver
+            .resolve(&d.ports, &d.latest_env, self.dt, &mut d.fluid_update_buf)?;
 
         #[cfg(test)]
         let humidity_alpha_before = thread_allocations();
@@ -1651,9 +1638,7 @@ impl StepPipeline {
 
         #[cfg(feature = "observe")]
         if d.observer_buf.is_some() {
-            let zip_scale = d
-                .electrical_solver
-                .effective_load_scale(&d.latest_env.grid);
+            let zip_scale = d.electrical_solver.effective_load_scale(&d.latest_env.grid);
             let port_load_raw_w = d.ports.electrical.load_power_w;
             let port_load_adj_w = port_load_raw_w * zip_scale;
             let port_net_w = port_load_adj_w + d.ports.electrical.generation_power_w;
@@ -1730,10 +1715,7 @@ impl StepPipeline {
         );
         #[cfg(test)]
         let fluid_alloc_before = thread_allocations();
-        d.latest_env
-            .domains
-            .fluid
-            .set_from(&d.fluid_update_buf);
+        d.latest_env.domains.fluid.set_from(&d.fluid_update_buf);
         #[cfg(test)]
         d.record_snapshot_allocations(fluid_alloc_before, SnapshotAllocSite::FluidSetFrom);
 
@@ -1787,7 +1769,6 @@ impl StepPipeline {
         d: &mut Dwelling,
         out: &mut StepResult,
     ) -> Result<()> {
-
         // Always-on invariant checks — unconditional in all build configurations.
         // These catch unrecoverable data corruption (NaN/Inf) in the two domains
         // where silent propagation would corrupt output records and downstream
@@ -1905,7 +1886,8 @@ impl StepPipeline {
         // End of the `invariants` phase; the per-step telemetry snapshot
         // (`state_snapshot` phase) follows.
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::StateSnapshot);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::StateSnapshot);
         #[cfg(test)]
         let state_snapshot_alloc_before = thread_allocations();
 
@@ -1919,9 +1901,7 @@ impl StepPipeline {
             #[cfg(test)]
             let zone_before = thread_allocations();
             match self.obs_phases.post_zone_update.as_mut() {
-                Some(capture) => {
-                    observer_capture::capture_zone_update_into(capture, &d.latest_env)
-                }
+                Some(capture) => observer_capture::capture_zone_update_into(capture, &d.latest_env),
                 None => {
                     self.obs_phases.post_zone_update =
                         Some(observer_capture::capture_zone_update(&d.latest_env));
@@ -1944,7 +1924,8 @@ impl StepPipeline {
             // captures were taken at the step start and (for the
             // equipment phases) written in place, so the slot carries
             // this step's data with its old buffers.
-            let mut slot = self.obs_slot
+            let mut slot = self
+                .obs_slot
                 .take()
                 .expect("the step's slot was taken at the step start");
             slot.step_index = d.clock.current_step();
@@ -2051,9 +2032,7 @@ impl StepPipeline {
             name == hares_types::telemetry_keys::HUMIDITY_SOLVER_TELEMETRY_KEY
                 || d.equipment_id_by_name.contains_key(name)
         });
-        d.latest_env
-            .equipment_telemetry
-            .reserve(d.equipment.len());
+        d.latest_env.equipment_telemetry.reserve(d.equipment.len());
         for idx in 0..d.equipment.len() {
             if d.step_failed[idx] {
                 continue;
@@ -2061,10 +2040,7 @@ impl StepPipeline {
             d.snapshot_equipment_entry(idx);
         }
         #[cfg(test)]
-        d.record_snapshot_allocations(
-            equipment_alloc_before,
-            SnapshotAllocSite::SnapshotEquipment,
-        );
+        d.record_snapshot_allocations(equipment_alloc_before, SnapshotAllocSite::SnapshotEquipment);
 
         for (i, entry) in d.roster.zone_temp_scratch.iter_mut().enumerate() {
             entry.1 = if let Some(env_idx) = d.roster.recording.zones.zone_env_indices[i] {
@@ -2153,7 +2129,6 @@ impl StepPipeline {
         record_output: bool,
         out: &mut StepResult,
     ) -> Result<()> {
-
         // Step 5: record outputs to disk (when enabled) and accumulate step results.
         if record_output && let Err(err) = d.record_step(out) {
             // A callback error ends the run the way the failure budget
@@ -2166,7 +2141,8 @@ impl StepPipeline {
         }
         // End of the `output` phase (Step 5).
         #[cfg(feature = "profiling")]
-        self.phase_clock.enter(&mut d.profiling, ProfilePhase::Accounting);
+        self.phase_clock
+            .enter(&mut d.profiling, ProfilePhase::Accounting);
         #[cfg(feature = "profiling")]
         {
             let alloc_after = thread_allocations();
@@ -2179,9 +2155,8 @@ impl StepPipeline {
                 let delta = after.saturating_sub(before);
                 d.profiling.hot_path_allocations =
                     Some(d.profiling.hot_path_allocations.unwrap_or(0) + delta);
-                d.profiling.hot_path_alloc_violations = Some(
-                    d.profiling.hot_path_alloc_violations.unwrap_or(0) + u64::from(delta > 0),
-                );
+                d.profiling.hot_path_alloc_violations =
+                    Some(d.profiling.hot_path_alloc_violations.unwrap_or(0) + u64::from(delta > 0));
             }
         }
 
