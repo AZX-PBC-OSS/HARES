@@ -39,11 +39,11 @@ use hares_output::recording::{
 };
 
 use super::recording::{RecordingLayer, actor_telemetry_views, build_envelope_columns};
+use super::dispatcher::{describe_target, target_lost};
 use super::{
     ActorPricing, ActorSeedState, Dwelling, Result, actor_equipment, build_actors_from_seeds,
     build_hvac_thermal_consistency, compute_equipment_dispatch_targets,
-    compute_equipment_execution_order, describe_target, target_lost, validate_equipment_stage,
-    validate_equipment_zones,
+    compute_equipment_execution_order, validate_equipment_stage, validate_equipment_zones,
 };
 /// The values the per-step path reads that derive from the equipment and
 /// actor rosters. Replaced only by [`Dwelling::install_roster_caches`];
