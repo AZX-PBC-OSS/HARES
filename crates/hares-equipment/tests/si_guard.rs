@@ -659,6 +659,7 @@ static UNIT_SUFFIX_ALLOWED: &[&str] = &[
     "crates/hares-core/src/dwelling/premise_zip.rs",
     "crates/hares-core/src/dwelling/recording.rs",
     "crates/hares-core/src/dwelling/roster.rs",
+    "crates/hares-core/src/dwelling/step_pipeline.rs",
     "crates/hares-core/src/dwelling/synthetic.rs",
     "crates/hares-core/src/dwelling/testing.rs",
     "crates/hares-core/src/invariants.rs",
