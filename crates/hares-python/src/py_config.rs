@@ -862,7 +862,9 @@ pub(crate) struct DwellingConfigArgs<'a> {
     pub unexpected: Option<&'a Bound<'a, PyDict>>,
 }
 
-fn parse_overrides(overrides: Option<&Bound<'_, PyDict>>) -> PyResult<Option<serde_json::Value>> {
+pub(crate) fn parse_overrides(
+    overrides: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<serde_json::Value>> {
     let Some(dict) = overrides else {
         return Ok(None);
     };

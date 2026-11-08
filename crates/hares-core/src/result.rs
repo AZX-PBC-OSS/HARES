@@ -250,7 +250,7 @@ pub(crate) fn catalogue_digest_bytes(catalogue: &hares_output::Catalogue) -> [u8
 
 /// One equipment's init-time provenance: the diagnostics equipment
 /// preamble's records, one entry per equipment.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct EquipmentProvenance {
     /// The equipment's instance name.
     pub name: String,

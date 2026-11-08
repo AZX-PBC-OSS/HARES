@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 mod conversions;
 mod py_actor;
 mod py_blueprint;
+mod py_calibration;
 mod py_callback;
 mod py_catalogue;
 mod py_config;
@@ -75,6 +76,8 @@ use py_weather::PyWeatherTimeSeries;
 #[pymodule]
 fn _hares(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDwelling>()?;
+    m.add_class::<py_calibration::PyCalibrationDwelling>()?;
+    m.add_class::<py_calibration::PyCalibrationRun>()?;
     m.add_class::<py_gym::PyObservationPlan>()?;
     m.add_class::<py_callback::PyBatchInfo>()?;
     m.add_class::<PyTimestepsIter>()?;
