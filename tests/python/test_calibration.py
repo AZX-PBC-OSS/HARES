@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import polars as pl
+import pyarrow as pa
 import pyarrow.ipc as pa_ipc
 import pytest
 
@@ -63,14 +64,19 @@ def cal_config(**kw: Any) -> SimulationConfig:
     )
 
 
-def make_source(hpxml: str = HPXML, **kw: Any) -> Dwelling:
+def make_source(
+    hpxml: str = HPXML, overrides: dict[str, Any] | None = None
+) -> Dwelling:
+    """The BEopt source dwelling; ``overrides`` rides its configuration's
+    own override map, the base a call's overrides merge over."""
     dwelling = Dwelling.from_hpxml(
         hpxml,
         SCHEDULE,
         WEATHER,
         defaults=str(HARES_DEFAULTS),
         bldg_id=1,
-        config=cal_config(**kw),
+        config=cal_config(),
+        overrides=overrides,
     )
     dwelling.initialize()
     return dwelling
@@ -180,6 +186,51 @@ class TestDeterminism:
         assert big_overrides == {"PV": {"capacity_w": 9000}}
 
 
+class TestOverrideMerge:
+    def test_call_overrides_merge_over_the_configurations_own_per_equipment_key(self):
+        """A call's override map merges over the configuration's own per
+        equipment key: the caller's entry wins wholesale, the other keys
+        survive, and the merged map is what the period's provenance names
+        and what the rows are built from (the rows equal a direct
+        evaluation with the merged map alone)."""
+        source = make_source(BASE_PV, overrides={"PV": {"capacity_w": 5000}})
+        merged = evaluate(source, overrides={"PV": {"capacity_w": 9000}}, seed=42)
+        direct = evaluate(
+            make_source(BASE_PV), overrides={"PV": {"capacity_w": 9000}}, seed=42
+        )
+        provenance = json.loads(schema_metadata(merged)["hares:provenance"])[0]
+        assert provenance["settings"]["overrides"] == {"PV": {"capacity_w": 9000}}
+        assert merged.ipc_bytes() == direct.ipc_bytes()
+
+        # A call entry for another equipment key leaves the base entry in
+        # place.
+        other = evaluate(
+            source,
+            overrides={"Electric Resistance Water Heater": {"setpoint_c": 60.0}},
+            seed=42,
+        )
+        other_provenance = json.loads(schema_metadata(other)["hares:provenance"])[0]
+        assert other_provenance["settings"]["overrides"] == {
+            "Electric Resistance Water Heater": {"setpoint_c": 60.0},
+            "PV": {"capacity_w": 5000},
+        }
+
+        # The caller's entry replaces the base entry wholesale: the base's
+        # tilt is not carried into the merged PV entry, so the rows are the
+        # direct evaluation's.
+        tilted = make_source(
+            BASE_PV, overrides={"PV": {"capacity_w": 5000, "tilt_deg": 20.0}}
+        )
+        replaced = evaluate(tilted, overrides={"PV": {"capacity_w": 9000}}, seed=42)
+        replaced_provenance = json.loads(schema_metadata(replaced)["hares:provenance"])[
+            0
+        ]
+        assert replaced_provenance["settings"]["overrides"] == {
+            "PV": {"capacity_w": 9000}
+        }
+        assert replaced.ipc_bytes() == direct.ipc_bytes()
+
+
 class TestSchema:
     def test_ipc_schema_carries_the_contract_metadata(self):
         """The IPC schema names the surface, the seed, the periods, the
@@ -218,6 +269,15 @@ class TestSchema:
         assert provenance[0]["build"]["version"]
         # The merged overrides the run ran under: none here.
         assert provenance[0]["settings"]["overrides"] is None
+
+        # The Arrow stream surface is the same table: the same columns, the
+        # same metadata and the same values, exported rather than
+        # serialised.
+        streamed = cast(Any, pa.RecordBatchReader.from_stream(run.arrow()).read_all())
+        assert streamed.column_names == table.column_names
+        assert streamed.schema.metadata == table.schema.metadata
+        for name in table.column_names:
+            assert streamed.column(name).to_pylist() == table.column(name).to_pylist()
 
     def test_timestamp_column_is_the_wall_clock_at_interval_start(self):
         """The timestamp column is the step's own time, the frame's
@@ -435,6 +495,9 @@ class TestWarmupResiduals:
             assert len(outcomes) == 1
             engine = source.health().warmup
             assert outcomes[0] == engine
+            # The same run's own health, not a second run's: the report is
+            # the finished period's `RunHealth.warmup`.
+            assert outcomes[0] == run.results[0].health.warmup
             assert engine.outcome == "ran"
             assert engine.converged is converged
             if not converged:
@@ -484,13 +547,40 @@ class TestWarmupResiduals:
         )
         assert json.loads(schema_metadata(run)["hares:warmup"]) == ["Disabled"]
 
+    def test_each_period_reports_its_own_warmup_outcome(self):
+        """A two-period run reports each period's own engine health, in
+        period order: the periods start in different weather, so their
+        warm-up residuals differ, and outcome i equals
+        ``results[i].health.warmup`` for every i. A surface returning one
+        period's outcome for all of them fails here."""
+        source = self.cz4a_source(
+            WarmupConfig(temperature_tolerance_c=1e-9, max_days=2)
+        )
+        run = evaluate(
+            source,
+            periods=[
+                ("2023-01-01T00:00:00-07:00", 2 * 86_400),
+                ("2023-01-02T12:00:00-07:00", 2 * 86_400),
+            ],
+            seed=7,
+        )
+        outcomes = run.warmup_residuals()
+        assert len(outcomes) == 2
+        assert [outcome == result.health.warmup for outcome, result in zip(
+            outcomes, run.results
+        )] == [True, True]
+        # The two starts converge over different weather: the outcomes are
+        # not one value repeated.
+        assert outcomes[0] != outcomes[1]
+
 
 class TestPeriods:
     def test_periods_run_independently_and_in_period_order(self):
         """The periods' rows appear in period order, each period's
-        timestamps restart at its own start, and a period's rows are the
-        same rows the period runs alone: the periods are independent
-        runs, not one run sliced."""
+        timestamps restart at its own start, and EVERY period's rows are
+        the same rows that period runs alone: the periods are independent
+        runs, not one run sliced or a later period continuing an earlier
+        one's state."""
         source = make_source()
         first_start = "2019-01-15T10:00:00-07:00"
         second_start = "2019-02-15T10:00:00-07:00"
@@ -499,7 +589,8 @@ class TestPeriods:
             periods=[(first_start, 6 * 3600), (second_start, 6 * 3600)],
             seed=42,
         )
-        solo = evaluate(source, periods=[(first_start, 6 * 3600)], seed=42)
+        solo_first = evaluate(source, periods=[(first_start, 6 * 3600)], seed=42)
+        solo_second = evaluate(source, periods=[(second_start, 6 * 3600)], seed=42)
 
         frame = ipc_frame(both)
         n_first = frame.filter(pl.col("period") == 0).height
@@ -511,12 +602,19 @@ class TestPeriods:
         stamps = frame["timestamp"].to_list()
         assert stamps[0] == datetime(2019, 1, 15, 10, 0, 0)
         assert stamps[n_first] == datetime(2019, 2, 15, 10, 0, 0)
-        # Period 0's rows are the solo run's rows, bitwise.
+        # Every period's rows are the solo run's rows, bitwise: the first
+        # period proves the later periods' presence moves nothing, and the
+        # last proves no earlier period's state carried into it.
         assert (
             frame.filter(pl.col("period") == 0)
             .drop("period")
-            .equals(ipc_frame(solo).drop("period"))
-        ), "a period's rows must not depend on the other periods' presence"
+            .equals(ipc_frame(solo_first).drop("period"))
+        ), "the first period's rows must not depend on the later periods"
+        assert (
+            frame.filter(pl.col("period") == 1)
+            .drop("period")
+            .equals(ipc_frame(solo_second).drop("period"))
+        ), "a later period's rows must not depend on the earlier periods"
 
     def test_period_spanning_a_skipped_feb_29_runs_the_clocks_steps(self):
         """A period whose 48-hour span contains a Feb 29 the typical

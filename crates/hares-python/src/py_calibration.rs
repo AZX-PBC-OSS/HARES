@@ -990,11 +990,12 @@ mod tests {
 
             // The count pin, bounded: the repeated call allocates what
             // the call before it allocated, within a handful of
-            // allocations. The measured shape on this fixture is
-            // 348 566 to 348 568, the drift ±2 on ~348.6k from the
-            // engine's process-global content sharing's one-time lazy
-            // initializations, no trend: growth or a hidden run pool
-            // would move the count by the run's own size, not by two.
+            // allocations. The measured steady-state counts on this
+            // fixture are 348 566 to 348 568 for the 48 hourly steps, a
+            // per-call spread of two with no trend: growth, or a hidden
+            // run pool large enough to matter, would move the count by the
+            // run's own size, not by two, and the retained-bytes pin above
+            // excludes a per-call leak.
             for drift in [(d2, d3), (d3, d4), (d4, d5)] {
                 assert!(
                     drift.0.abs_diff(drift.1) <= 4,
@@ -1002,6 +1003,19 @@ mod tests {
                      {d3} {d4} {d5}"
                 );
             }
+
+            // The count's lower bound: the measured evaluation's ~348.6k
+            // allocations for 48 hourly steps land on the calling thread.
+            // A hidden parallel run pool would move the run off it and
+            // leave only the return path's bookkeeping, so the drift pin
+            // above would hold at a count near zero; the floor is a third
+            // of the measured count and orders above any cross-thread
+            // residue.
+            assert!(
+                d2 > 100_000,
+                "the evaluation's allocations must land on the calling thread \
+                 (a hidden run pool leaves only the return path on it), measured {d2}"
+            );
         });
     }
 }
