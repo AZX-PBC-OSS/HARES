@@ -1,21 +1,11 @@
-"""HELICS runner config helpers for launching GridLAB-D + HARES federates."""
+"""HELICS runner config helpers: the federate entries and the JSON configuration the external ``helics`` CLI consumes."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import os
 from pathlib import Path
 import shlex
-import tempfile
 from typing import Any
-
-try:
-    import helics
-except ImportError as exc:  # pragma: no cover - exercised via import test
-    raise ImportError(
-        "HELICS not installed. Install with: pip install 'hares[helics]'"
-    ) from exc
 
 from .dwelling import federate_argument_names
 
@@ -77,39 +67,6 @@ def generate_cosim_config(federates: list[FederateConfig], broker: bool = True) 
         "broker": bool(broker),
         "federates": federate_entries,
     }
-
-
-def run_cosimulation(config: dict[str, Any] | Path) -> None:
-    """Run a HELICS co-simulation via ``helics.cli.run``.
-
-    Example:
-        >>> cfg = generate_cosim_config([
-        ...     FederateConfig(name="gridlabd", exec_command="gridlabd feeder.glm"),
-        ...     FederateConfig(name="house_1", exec_command="python run_house.py"),
-        ... ])
-        >>> run_cosimulation(cfg)
-
-    Args:
-        config: Either an in-memory config dict or path to an existing JSON file.
-    """
-
-    cli = getattr(helics, "cli", None)
-    if cli is None or not hasattr(cli, "run"):
-        raise RuntimeError("HELICS Python module does not expose helics.cli.run")
-
-    if isinstance(config, Path):
-        cli.run(str(config))
-        return
-
-    temp_fd, temp_name = tempfile.mkstemp(suffix=".json")
-    temp_path = Path(temp_name)
-    try:
-        with os.fdopen(temp_fd, mode="w", encoding="utf-8") as handle:
-            json.dump(config, handle)
-            handle.flush()
-        cli.run(str(temp_path))
-    finally:
-        temp_path.unlink(missing_ok=True)
 
 
 def make_dwelling_federate_config(

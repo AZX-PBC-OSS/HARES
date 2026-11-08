@@ -17,7 +17,6 @@ from .runner import (
     FederateConfig,
     generate_cosim_config,
     make_dwelling_federate_config,
-    run_cosimulation,
 )
 
 __all__ = [
@@ -35,7 +34,6 @@ __all__ = [
     "FederateConfig",
     "generate_cosim_config",
     "make_dwelling_federate_config",
-    "run_cosimulation",
     "HELICSDwelling",
     "HELICSFleet",
     "HELICSPublicationConfig",
