@@ -13,6 +13,30 @@ Every callable, class and keyword added to, changed in or removed from
 `hares._hares` since `ebdb1a17`, each removed or renamed one with its
 replacement.
 
+- Added: `CalibrationDwelling` and `CalibrationRun`, the immutable
+  calibration evaluation surface. `CalibrationDwelling.from_dwelling(dwelling)`
+  wraps a dwelling's configuration; each `evaluate(overrides,
+  observation_fields, periods, seed)` call builds a fresh immutable
+  dwelling blueprint with the call's overrides and seed, freezes ONE
+  observation plan, runs the requested independent `(start,
+  duration_seconds)` periods and returns a `CalibrationRun`: the
+  observations of every period as one Arrow table (`ipc_bytes()` serialises
+  the stream, `arrow()` exposes it zero-copy), the fields and their units,
+  the timestamp convention, the seed, the periods' warm-up outcomes and the
+  provenance carried in the schema's metadata, and the periods' warm-up
+  outcomes readable with `warmup_residuals()`. The surface's honesty: the
+  source dwelling is never acquired and its state cannot move (a
+  successful evaluation leaves the source's checkpoint and health bitwise
+  unchanged); an unknown override or observation field fails with 0 run
+  steps simulated (the plan freezes against a no-warm-up build, before any
+  build that simulates), every failure the engine's own typed exception
+  class carrying the failing `stage` and the `steps_simulated` as
+  attributes; an evaluate with zero periods is refused, never substituted
+  with empty output; there is no in-place parameter application and no
+  hidden parallel run pool (the periods run sequentially on the calling
+  thread, one dwelling resident at a time); the same seed, overrides and
+  periods reproduce byte-identical IPC.
+
 - Added: the `max_memory_rows` keyword on `SimulationConfig` (default
   `None`): the memory reports' soft row cap. A `Memory`-destination
   report whose run projects more rows than the cap fails validation

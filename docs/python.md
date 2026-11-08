@@ -515,6 +515,84 @@ where a column's unit and labels live).
 `SteppableFleet` stepping does not rewind: a stepped fleet's dwellings
 advance one step per `step()` call across the whole fleet.
 
+## Calibration
+
+`CalibrationDwelling` evaluates a dwelling's configuration against
+parameter overrides and returns the observations as Arrow IPC: the one
+typed entry point for the override-build-plan-run-return transaction a
+calibration sweep otherwise orchestrates by hand. The surface wraps a
+built dwelling's configuration and never touches the dwelling itself.
+
+```python
+from hares import CalibrationDwelling, Dwelling, SimulationConfig
+
+dw = Dwelling.from_hpxml(
+    hpxml="path/to/building.xml",
+    schedule="path/to/schedules.csv",
+    weather="path/to/weather.epw",
+    config=SimulationConfig(start_time="2019-01-01T00:00:00", duration=86400, time_res=900),
+    defaults="path/to/HARES/defaults",
+)
+dw.initialize()
+
+cal = CalibrationDwelling.from_dwelling(dw)
+run = cal.evaluate(
+    overrides={"PV": {"capacity_w": 9000}},
+    observation_fields=["total_power_w", "outdoor_temp"],
+    periods=[("2019-01-01T00:00:00", 30 * 86400), ("2019-07-01T00:00:00", 30 * 86400)],
+    seed=7,
+)
+frame = run.arrow()            # the periods' observations, one row per step
+ipc = run.ipc_bytes()          # the same table as the Arrow IPC stream's bytes
+run.warmup_residuals()         # the periods' warm-up outcomes, in period order
+```
+
+What one call does, in order: the overrides and the periods validate
+(typed, no dwelling built); one no-warm-up build freezes the observation
+plan, so an unknown field fails with 0 run steps simulated, naming it;
+then each period runs from a fresh immutable blueprint carrying the
+merged overrides and the seed, the periods sequential on the calling
+thread, one dwelling resident at a time. The overrides merge over the
+configuration's own per equipment key, the caller's entries winning. The
+same seed, overrides and periods reproduce byte-identical IPC, schema
+ordering included.
+
+The table carries a `period` column (the periods' indices), a
+`timestamp` column (the local wall clock at each step's interval start,
+milliseconds, the output frame's convention) and one float64 column per
+observation field in the caller's order. The schema's metadata carries
+the contract: `hares:fields` and `hares:units` (the fields in column
+order and each one's unit), `hares:seed`, `hares:periods` (each period's
+start, duration, step count and site UTC offset), `hares:warmup` (the
+periods' warm-up outcomes) and `hares:provenance` (each period's build
+identity, catalogue digest, settings including the merged overrides,
+input digests and replay blockers). The units are the engine's own unit
+vocabulary's symbols; an actor telemetry channel's unit is the empty
+string, the engine does not know it.
+
+`warmup_residuals()` reads the engine's own `RunHealth.warmup` off each
+finished period and reports it honestly: a disabled warm-up reads
+`disabled` with no residuals, a one-day warm-up reads `ran` with no
+residuals (no predecessor to diff against), an unconverged one reads its
+days and its final day's residuals, and a converged one reads the
+residuals it converged at.
+
+The failure shape: every failure is the engine's own typed exception
+class (a configuration mistake a `HaresConfigError`, an override the
+equipment rejected a `HaresEquipmentError`, a failed step or finalisation
+a `HaresSimulationError`, a failed batch callback a `HaresCallbackError`
+with the raised object chained as `__cause__`), carrying the failing
+`stage` and the `steps_simulated` as attributes and naming the step
+count in the message. An evaluate with zero periods is refused outright:
+empty output is never substituted for a run. The configuration's reports
+ride every period's run, and `run.results` reads each period's finished
+`RunResult`.
+
+The source dwelling's runtime state is not part of what an evaluation
+runs: registered actors, applied controls, an attached tariff and
+stepped history live on the dwelling, not in the configuration, so an
+evaluation is reproducible from the configuration alone.
+
 ## Changes in this release
 
 Every callable, class and keyword added to, changed in or removed from
