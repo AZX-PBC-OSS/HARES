@@ -65,7 +65,7 @@ The same signed value is pushed to **three channels per equipment** with **no ne
 2. **CoreOutput** (`CoreFlows.reactive_power_var`, VAR)
 3. **Telemetry** (`REACTIVE_POWER_KVAR` key)
 
-A debug-build validator `validate_port_core_electrical_consistency` (`crates/hares-types/src/equipment.rs:1252`) asserts these three channels agree on every equipment step. It fires in all three equipment dispatch phases of the dwelling step (search `crates/hares-core/src/dwelling/mod.rs` for `validate_port_core_electrical_consistency`; line numbers shift too often to cite).
+A debug-build validator `validate_port_core_electrical_consistency` (`crates/hares-types/src/equipment.rs:1252`) asserts these three channels agree on every equipment step. It fires in all three equipment dispatch phases of the dwelling step (search `crates/hares-core/src/dwelling/step_pipeline.rs` for `validate_port_core_electrical_consistency`; line numbers shift too often to cite).
 
 **Generation implications:** A generating PV at pf < 1 *supplies* vars, producing a negative bus Q. The PV module computes one signed bus Q and uses it identically for port, CoreOutput, and telemetry with no additional negation (`pv/mod.rs:1053-1117`).
 

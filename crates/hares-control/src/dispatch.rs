@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn dispatch_target_variant_construction() {
         // Both variants remain constructible — ByEndUse is an input-only convenience
-        // that is expanded to ByName at queue time in dwelling/mod.rs drain_tiers.
+        // that is expanded to ByName at queue time in dwelling/dispatcher.rs drain_tiers.
         let by_name = DispatchTarget::ByName(Arc::from("Battery #1"));
         let by_end_use = DispatchTarget::ByEndUse(EndUse::HVAC_HEATING);
 
