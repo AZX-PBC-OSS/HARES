@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from ._hares import __version__
 from ._hares import Dwelling
+from ._hares import CalibrationDwelling
+from ._hares import CalibrationRun
 from ._hares import DwellingBlueprint
 from ._hares import ParsedHpxml
 from ._hares import ParsedWeather
@@ -180,6 +182,8 @@ from ._hares import batch_step
 __all__ = [
     # Core simulation
     "Dwelling",
+    "CalibrationDwelling",
+    "CalibrationRun",
     "DwellingBlueprint",
     "ParsedHpxml",
     "ParsedWeather",

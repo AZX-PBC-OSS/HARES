@@ -29,6 +29,42 @@ pub(crate) struct ObservationSource {
     pub(crate) kind: ObservationKind,
 }
 
+impl ObservationSource {
+    /// The source's unit, in the output vocabulary's own symbols: the
+    /// quantity the field reads is the catalogue's quantity space, so
+    /// the unit is the catalogue's spelling of it. An actor telemetry
+    /// channel's unit is the empty unit, honestly: the engine does not
+    /// know the channel's unit.
+    pub(crate) fn unit(&self) -> hares_types::Unit {
+        match &self.kind {
+            ObservationKind::OutdoorTemp
+            | ObservationKind::ZoneTemperature { .. }
+            | ObservationKind::SetpointHeat { .. }
+            | ObservationKind::SetpointCool { .. } => hares_types::Unit::Celsius,
+            ObservationKind::OutdoorHumidityRatio => hares_types::Unit::KilogramPerKilogram,
+            ObservationKind::TotalPowerKw
+            | ObservationKind::GridInterchangeKw
+            | ObservationKind::ZoneEnergyBalance { .. }
+            | ObservationKind::EquipmentPower { .. } => hares_types::Unit::Watt,
+            ObservationKind::ReactivePowerKvar => hares_types::Unit::VoltAmpereReactive,
+            ObservationKind::Islanded => hares_types::Unit::Boolean,
+            ObservationKind::BusVoltagePu
+            | ObservationKind::TimeSin
+            | ObservationKind::TimeCos
+            | ObservationKind::ClockHour
+            | ObservationKind::ClockDay => hares_types::Unit::Dimensionless,
+            ObservationKind::EquipmentSoc { .. } => hares_types::Unit::Fraction,
+            ObservationKind::ScheduleRow => hares_types::Unit::Code,
+            ObservationKind::OccupantsPresent | ObservationKind::ClockStep => {
+                hares_types::Unit::Count
+            }
+            ObservationKind::ActorDot { .. } | ObservationKind::ActorBare { .. } => {
+                hares_types::Unit::None
+            }
+        }
+    }
+}
+
 /// Which setpoint column a zone field reads.
 pub(crate) enum SetpointSide {
     Heat,
@@ -209,6 +245,17 @@ impl ObservationPlan {
             .iter()
             .map(|source| source.field.clone())
             .collect()
+    }
+
+    /// The fields' units, in plan order: the output vocabulary's own
+    /// unit per resolved source, the same single vocabulary the
+    /// catalogue reports with. An actor telemetry channel's unit is
+    /// `hares_types::Unit::None` (the empty unit): the engine does not
+    /// know the channel's unit and the metadata says so instead of
+    /// guessing one.
+    #[must_use]
+    pub fn field_units(&self) -> Vec<hares_types::Unit> {
+        self.sources.iter().map(ObservationSource::unit).collect()
     }
 
     /// The number of fields the plan fills.

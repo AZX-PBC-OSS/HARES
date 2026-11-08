@@ -82,14 +82,26 @@ pub struct PyBatchInfo {
 pub(crate) type CallbackCauseSlot = Arc<Mutex<Option<PyErr>>>;
 
 /// The Rust sink over a Python callable: the attached object is called
-/// once per flushed batch, in flush order.
+/// once per flushed batch, in flush order. The callable sits in an `Arc`
+/// so one Python callable serves every dwelling that shares it (the
+/// calibration surface attaches the same callable to every period's
+/// dwelling): an `Arc` clone needs no GIL, a `Py` clone would.
 pub(crate) struct PyBatchCallback {
-    callable: Py<PyAny>,
+    callable: Arc<Py<PyAny>>,
     cause: CallbackCauseSlot,
 }
 
 impl PyBatchCallback {
     pub(crate) fn new(callable: Py<PyAny>, cause: CallbackCauseSlot) -> Self {
+        Self {
+            callable: Arc::new(callable),
+            cause,
+        }
+    }
+
+    /// The sink over a callable already shared: the calibration
+    /// surface's per-period attaches.
+    pub(crate) fn shared(callable: Arc<Py<PyAny>>, cause: CallbackCauseSlot) -> Self {
         Self { callable, cause }
     }
 }

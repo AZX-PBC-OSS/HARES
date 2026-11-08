@@ -30,7 +30,7 @@ use crate::py_report::PyFrequency;
 /// The weather format's serde spelling: the string the record's own
 /// serialisation uses, so a Python reader and a TOML reader spell the
 /// format identically.
-fn weather_format_name(format: hares_input::WeatherFormat) -> String {
+pub(crate) fn weather_format_name(format: hares_input::WeatherFormat) -> String {
     serde_json::to_string(&format)
         .expect("a WeatherFormat always serialises")
         .trim_matches('"')
@@ -366,7 +366,7 @@ impl PyRunHealth {
 /// How the warm-up convergence loop ended.
 #[pyclass(frozen, name = "WarmupOutcome")]
 pub struct PyWarmupOutcome {
-    inner: RustWarmupOutcome,
+    pub(crate) inner: RustWarmupOutcome,
 }
 
 #[pymethods]

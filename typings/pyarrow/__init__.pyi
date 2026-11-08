@@ -23,6 +23,12 @@ class DataType: ...
 def float64() -> DataType: ...
 
 
+def timestamp(unit: str) -> DataType: ...
+
+
+def uint32() -> DataType: ...
+
+
 class Array:
     def to_pylist(self) -> list[float]: ...
     def __len__(self) -> int: ...
@@ -35,11 +41,13 @@ class ChunkedArray:
 
 class Field:
     name: str
+    type: DataType
     metadata: dict[bytes, bytes] | None
 
 
 class Schema:
     metadata: dict[bytes, bytes] | None
+    names: list[str]
 
     def field(self, i: int | str) -> Field: ...
     def fields(self) -> list[Field]: ...

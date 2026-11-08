@@ -3107,7 +3107,15 @@ impl PyDwelling {
 }
 
 pub(crate) fn to_py_err(err: HaresError) -> PyErr {
-    let msg = err.to_string();
+    let message = err.to_string();
+    to_py_err_msg(err, message)
+}
+
+/// The classification of [`to_py_err`], with the message the caller
+/// states: a surface that wraps an engine failure with its own context
+/// (the stage, the run steps simulated) keeps the cause's exception
+/// class and names the cause in the message it adds to.
+pub(crate) fn to_py_err_msg(err: HaresError, msg: String) -> PyErr {
     // A rejected equipment's error carries the warnings it raised; the
     // exception class follows the reason it was rejected for.
     let classified = match &err {

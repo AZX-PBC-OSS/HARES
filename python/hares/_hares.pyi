@@ -3619,6 +3619,95 @@ class Dwelling:
     def __repr__(self) -> str: ...
 
 # ---------------------------------------------------------------------------
+# Calibration
+# ---------------------------------------------------------------------------
+
+class CalibrationDwelling:
+    """The immutable calibration evaluation surface over a dwelling's
+    configuration.
+
+    Wraps the configuration the source dwelling was built from (its
+    inputs, settings, reports and warm-up policy) and evaluates it: each
+    ``evaluate`` call builds a fresh immutable dwelling blueprint with
+    the call's overrides and seed, freezes ONE observation plan, runs the
+    requested independent periods and returns the observations as Arrow
+    IPC. The source dwelling is never acquired: an evaluation cannot
+    touch its state, and its runtime state (registered actors, applied
+    controls, an attached tariff, stepped history) is not part of what
+    an evaluation runs.
+
+    An unknown override or observation field fails with 0 run steps
+    simulated (the observation plan freezes against a no-warm-up build,
+    before any build that simulates); an evaluate with zero periods is
+    refused, never substituted with empty output; every failure is the
+    engine's own typed exception class, carrying the failing ``stage``
+    and the ``steps_simulated`` as attributes. The same seed, overrides
+    and periods reproduce byte-identical IPC."""
+    @classmethod
+    def from_dwelling(cls, dwelling: Dwelling) -> CalibrationDwelling: ...
+    def attach_callback(self, report: str, fn: Callable[[BatchInfo, ArrowArrayExportable], None]) -> None:
+        """Attaches the callable as the runs' batch callback, applied to
+        every period's dwelling before its steps: the same attachment
+        ``Dwelling.attach_callback`` performs. The report must be the
+        configuration's own and deliver to the callback destination."""
+    def evaluate(
+        self,
+        overrides: dict[str, Any] | None,
+        observation_fields: list[str],
+        periods: list[tuple[str, int]],
+        seed: int,
+    ) -> CalibrationRun:
+        """Runs the whole override-build-plan-run-return transaction.
+
+        ``overrides`` merges over the configuration's own per equipment
+        key, the caller's entries winning; ``observation_fields`` freeze
+        one plan, one column per field in this order; ``periods`` are
+        independent ``(start, duration_seconds)`` runs, each built from
+        a fresh immutable blueprint carrying the overrides and the seed;
+        ``seed`` is the master seed the periods' random streams derive
+        from. The periods run sequentially, one dwelling resident at a
+        time.
+        """
+    def __repr__(self) -> str: ...
+
+class CalibrationRun:
+    """One calibration evaluation's result: the observations of every
+    period as one Arrow table, the warm-up outcomes and the provenance
+    in the schema's metadata."""
+    @property
+    def fields(self) -> list[str]:
+        """The observation fields, in column order (the caller's order)."""
+    @property
+    def seed(self) -> int: ...
+    @property
+    def n_periods(self) -> int: ...
+    @property
+    def rows(self) -> int:
+        """Observation rows over all periods: one per step."""
+    @property
+    def steps_simulated(self) -> int:
+        """The run steps the evaluation simulated, all periods together."""
+    def warmup_residuals(self) -> list[WarmupOutcome]:
+        """The periods' warm-up outcomes, in period order: the engine's
+        own ``RunHealth.warmup`` values, read off the finished runs. A
+        disabled warm-up reads ``disabled`` with no residuals; a one-day
+        warm-up reads ``ran`` with no residuals (no predecessor to diff
+        against)."""
+    def arrow(self) -> ArrowStreamExportable:
+        """The observations as an Arrow stream; the schema's metadata
+        carries the surface, the seed, the periods, the fields and
+        units, the warm-up outcomes and the provenance."""
+    def ipc_bytes(self) -> bytes:
+        """The observations as the Arrow IPC stream's bytes: the schema
+        message, then every row, then the end. The same inputs and seed
+        produce byte-identical bytes."""
+    @property
+    def results(self) -> list[RunResult]:
+        """The finished runs' results, one per period in period order:
+        the reports the configuration declared ride every period's run."""
+    def __repr__(self) -> str: ...
+
+# ---------------------------------------------------------------------------
 # Gym / RL
 # ---------------------------------------------------------------------------
 
