@@ -493,6 +493,7 @@ For per-equipment columns in recorder output (`Dwelling::record_step`):
 | `hares-core/src/observer.rs` | Observer types and ObserverBuffer |
 | `hares-core/src/observer_capture.rs` | Capture functions and port diffing (per-equipment reactive delta) |
 | `hares-core/src/diagnostics.rs` | Diagnostic CSV output (incl. `electrical_net_var`, per-equipment `reactive_var`) |
-| `hares-core/src/dwelling/mod.rs` | Integration: run_timestep observation sites, check_step_invariants, validate_port_core_electrical_consistency calls |
+| `hares-core/src/dwelling/mod.rs` | Integration: the step entry, `check_step_invariants`, the equipment contract check and the rollback and success recorders |
+| `hares-core/src/dwelling/step_pipeline.rs` | The nine step legs: the observation capture sites and the per-equipment `validate_port_core_electrical_consistency` calls |
 | `hares-envelope/src/thermal_solver/config.rs` | EnvelopeComponentGains |
 | `crates/hares-types/src/equipment.rs` | `validate_port_core_electrical_consistency` — port/CoreOutput reactive consistency validator |
