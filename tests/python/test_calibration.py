@@ -488,6 +488,37 @@ class TestPeriods:
             .equals(ipc_frame(solo).drop("period"))
         ), "a period's rows must not depend on the other periods' presence"
 
+    def test_period_spanning_a_skipped_feb_29_runs_the_clocks_steps(self):
+        """A period whose 48-hour span contains a Feb 29 the typical
+        weather year does not carry runs the engine's own simulated step
+        count, not the span's raw division: the calendar steps less the
+        skipped day's, exactly the steps the same configuration's ordinary
+        run reports. The evaluation must reproduce that run, not step past
+        its configured end."""
+        start = "2020-02-28T00:00:00-07:00"
+        source = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            defaults=str(HARES_DEFAULTS),
+            bldg_id=1,
+            config=SimulationConfig(
+                start_time=start, duration=2 * 86_400, time_res=3600, warmup=None
+            ),
+        )
+        source.initialize()
+        # The engine's own clock over this span: Feb 28 alone, 24 hourly
+        # steps (the typical-year rule skips Feb 29).
+        reference = list(source.timesteps())
+        assert len(reference) == 24
+
+        run = evaluate(source, periods=[(start, 2 * 86_400)], seed=42)
+        stamps = cast(Any, ipc_table(run)).column("timestamp").to_pylist()
+        assert stamps == reference
+        assert run.rows == 24
+        assert run.steps_simulated == 24
+        assert json.loads(schema_metadata(run)["hares:periods"])[0]["steps"] == 24
+
 
 class TestSurfaceShape:
     def test_run_reports_the_contract_totals(self):

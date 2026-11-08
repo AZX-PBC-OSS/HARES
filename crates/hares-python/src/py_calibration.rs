@@ -777,7 +777,6 @@ fn run_transaction(
 
     // The periods, sequentially on this thread, one dwelling resident at
     // a time: built, run, read, dropped.
-    let time_res_s = config.settings.sim_config.time_res.num_seconds();
     let mut steps_simulated: u64 = 0;
     let mut runs: Vec<PeriodRun> = Vec::with_capacity(periods.len());
     for (index, &(start, duration_s)) in periods.iter().enumerate() {
@@ -797,17 +796,21 @@ fn run_transaction(
                 .map_err(|err| EvaluationFailure::new("callback attach", steps_simulated, err))?;
         }
 
-        // The period's steps: one observation read per step, after the
-        // step wrote its state. The step count counts simulated steps:
-        // the step that simulated but could not be read counts.
-        let total_steps = usize::try_from(duration_s / time_res_s).map_err(|_| {
+        // The period's steps: the clock's own count, which is the run's
+        // simulated step count: the calendar steps less every skipped
+        // Feb 29's steps under the typical-year rule. Deriving the count
+        // from the requested duration instead would loop past the
+        // configured end on a span that contains one. One observation read
+        // per step, after the step wrote its state; the step that
+        // simulated but could not be read counts.
+        let step_count = dwelling.clock.total_steps();
+        let total_steps = usize::try_from(step_count).map_err(|_| {
             EvaluationFailure::new(
                 "periods",
                 steps_simulated,
                 HaresError::Dwelling(format!(
-                    "period {index}'s step count ({}) does not fit the platform's \
-                     usize",
-                    duration_s / time_res_s
+                    "period {index}'s step count ({step_count}) does not fit the platform's \
+                     usize"
                 )),
             )
         })?;

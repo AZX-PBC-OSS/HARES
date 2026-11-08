@@ -560,10 +560,13 @@ ordering included.
 The table carries a `period` column (the periods' indices), a
 `timestamp` column (the local wall clock at each step's interval start,
 milliseconds, the output frame's convention) and one float64 column per
-observation field in the caller's order. The schema's metadata carries
-the contract: `hares:fields` and `hares:units` (the fields in column
-order and each one's unit), `hares:seed`, `hares:periods` (each period's
-start, duration, step count and site UTC offset), `hares:warmup` (the
+observation field in the caller's order. A period's row count is the step
+count its clock simulates, so the typical-year rule's skipped Feb 29
+shortens a span exactly as it does an ordinary run. The schema's metadata
+carries the contract: `hares:fields` and `hares:units` (the fields in
+column order and each one's unit), `hares:seed`, `hares:periods` (each
+period's start, duration, step count and site UTC offset), `hares:warmup`
+(the
 periods' warm-up outcomes) and `hares:provenance` (each period's build
 identity, catalogue digest, settings including the merged overrides,
 input digests and replay blockers). The units are the engine's own unit
