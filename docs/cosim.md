@@ -39,6 +39,15 @@ defect and one of them changes.
 - **Completion:** a federate with no further steps signals completion
   with `request_time(HELICS_TIME_MAXTIME)` so the broker can coordinate
   shutdown without every peer stalling through the disconnect timeout.
+  The requests feeding the termination sentinel are horizon-bounded:
+  every stepping request is a step's exit time (the run's horizon bounds
+  them at seconds to days), and the only request above the horizon is the
+  completion handshake's exact `HELICS_TIME_MAXTIME`. HELICS 3.7.0 clamps
+  every grant at or above its termination-time threshold
+  (`HELICS_TIME_MAXTIME / 2`) up to `HELICS_TIME_MAXTIME`, so a bare
+  large request inside that clamping window would have a legitimate
+  grant returned as the termination sentinel; the federates never make
+  one.
 
 ## The boundary's variables and their units
 

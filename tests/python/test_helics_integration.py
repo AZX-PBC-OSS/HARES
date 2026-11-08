@@ -940,6 +940,40 @@ def test_fleet_completion_signal_unblocks_aggregator(core_type: str) -> None:
         )
 
 
+def test_a_bare_request_inside_the_termination_clamping_window_is_granted_unclamped() -> None:
+    """Pin of the grant behavior the federates' horizon-bound invariant leans
+    on (``handle_time_grant``'s contract): a bare request beyond every run's
+    horizon, placed inside HELICS 3.7.0's termination clamping window
+    (``[HELICS_TIME_MAXTIME / 2, HELICS_TIME_MAXTIME)``), is granted at the
+    requested value by the installed wheel, whose library clamps nothing
+    below ``HELICS_TIME_MAXTIME``. The grant therefore never reads as the
+    termination sentinel. The clamp lives on the C library's grant return
+    path, independent of the transport and of any peer, so one in-process
+    federate carries the pin. On a wheel bundling a 3.7.0+ library the same
+    request returns ``HELICS_TIME_MAXTIME`` (the clamp): that failure is the
+    documented signal to re-verify the horizon contract, not a regression
+    of this pin's subject."""
+    # Inside the clamping window: above the 3.7.0 termination threshold
+    # (HELICS_TIME_MAXTIME / 2, ~4.611e9), below HELICS_TIME_MAXTIME
+    # (~9.223e9), and exactly representable in HELICS's nanosecond time.
+    # Period 1.0 keeps the request a period multiple, so only the return
+    # path's clamp could alter the grant.
+    request_time_s = 5e9
+    with _Federation(n_federates=1) as federation:
+        fed = federation.value_federate("horizon_probe_1", time_res_s=1.0)
+        _enter_exec(fed)
+
+        granted = _request(fed, request_time_s)
+
+        assert granted == request_time_s, (
+            "the installed library must grant a clamping-window request at "
+            f"its requested value, got {granted!r}"
+        )
+        assert granted < helics.HELICS_TIME_MAXTIME, (
+            "the sentinel must not fire on a clamping-window grant"
+        )
+
+
 def test_publication_info_via_helics_api_fallback() -> None:
     """_set_publication_info attaches metadata via helicsPublicationSetInfo fallback.
 

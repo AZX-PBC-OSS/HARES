@@ -539,6 +539,11 @@ class HELICSFleet:
                     self._publish_results()
                     granted = self._request_time(exit_time_s)
 
+                # The sentinel is sound because every request above is a
+                # horizon-bounded exit time: HELICS 3.7.0 clamps grants at
+                # or above HELICS_TIME_MAXTIME / 2 up to
+                # HELICS_TIME_MAXTIME, so a bare large request would land
+                # here disguised as a federation termination.
                 if granted >= helics.HELICS_TIME_MAXTIME:
                     self._federation_terminated = True
                     break
