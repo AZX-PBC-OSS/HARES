@@ -25,7 +25,7 @@ Every witness reads the surface's behavior, never its implementation.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 
 import polars as pl
@@ -230,6 +230,36 @@ class TestSchema:
         # 10:00 local wall clock, the start's hour at the site's offset.
         assert stamps[0] == datetime(2019, 1, 15, 10, 0, 0)
         assert stamps[1] == datetime(2019, 1, 15, 10, 15, 0)
+
+    def test_period_start_metadata_is_the_local_start_at_the_site_offset(self):
+        """A period's recorded start is the run's own local start at the
+        site's offset, not the caller's spelling: a period named in UTC
+        runs on the site's wall clock, and the recorded start read with
+        the recorded offset is the first row's instant, so the metadata's
+        start and the table's rows agree."""
+        start = "2019-02-15T10:00:00Z"
+        source = Dwelling.from_hpxml(
+            HPXML,
+            SCHEDULE,
+            WEATHER,
+            defaults=str(HARES_DEFAULTS),
+            bldg_id=1,
+            config=SimulationConfig(
+                start_time=start, duration=6 * 3600, time_res=900, warmup=None
+            ),
+        )
+        source.initialize()
+        run = evaluate(source, periods=[(start, 6 * 3600)], seed=42)
+        (period,) = json.loads(schema_metadata(run)["hares:periods"])
+        recorded = datetime.fromisoformat(period["start"])
+        site = timezone(timedelta(seconds=period["utc_offset_s"]))
+        first = cast(Any, ipc_table(run)).column("timestamp")[0].as_py()
+        # The site's offset, not the caller's: Denver is UTC-7 in February.
+        assert recorded.utcoffset() == timedelta(hours=-7)
+        # The recorded wall clock and the row's wall clock are one value,
+        # and the recorded instant is that wall clock at the site offset.
+        assert recorded.replace(tzinfo=None) == first
+        assert recorded == first.replace(tzinfo=site)
 
 
 class TestSourceUnchanged:

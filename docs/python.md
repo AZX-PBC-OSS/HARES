@@ -565,8 +565,8 @@ count its clock simulates, so the typical-year rule's skipped Feb 29
 shortens a span exactly as it does an ordinary run. The schema's metadata
 carries the contract: `hares:fields` and `hares:units` (the fields in
 column order and each one's unit), `hares:seed`, `hares:periods` (each
-period's start, duration, step count and site UTC offset), `hares:warmup`
-(the
+period's local start at the site's UTC offset, its requested duration,
+its simulated step count and the site's UTC offset), `hares:warmup` (the
 periods' warm-up outcomes) and `hares:provenance` (each period's build
 identity, catalogue digest, settings including the merged overrides,
 input digests and replay blockers). The units are the engine's own unit

@@ -230,13 +230,16 @@ fn period_config(
 }
 
 /// One period's completed run: the finished run's result and catalogue,
-/// the provenance metadata, the period's bounds as they ran, and the
-/// observation rows (the period index, the step's wall-clock
-/// milliseconds, one row per step).
+/// the provenance metadata, the period's bounds as they ran (its local
+/// start at the site's UTC offset, its requested duration and its clock's
+/// simulated step count), and the observation rows (the period index, the
+/// step's wall-clock milliseconds, one row per step).
 struct PeriodRun {
     result: Arc<RunResult>,
     catalogue: Arc<Catalogue>,
     provenance: serde_json::Value,
+    /// The run's local start at the site's offset: the first timestamp's
+    /// wall clock, so the recorded start and the rows agree.
     start_rfc3339: String,
     duration_s: i64,
     steps: usize,
@@ -784,6 +787,10 @@ fn run_transaction(
             .map_err(|err| EvaluationFailure::new("periods", steps_simulated, err))?;
         let mut dwelling = Dwelling::from_config(period_config)
             .map_err(|err| EvaluationFailure::new("dwelling build", steps_simulated, err))?;
+        // The run's own local start: the engine reads the period's start as
+        // wall clock at the site's offset, so the metadata records the
+        // instant the run began rather than the caller's spelling of it.
+        let local_start = dwelling.clock.start_time;
         for (report, callable) in callbacks {
             dwelling
                 .attach_callback(
@@ -842,7 +849,7 @@ fn run_transaction(
             result,
             catalogue,
             provenance,
-            start_rfc3339: start.to_rfc3339(),
+            start_rfc3339: local_start.to_rfc3339(),
             duration_s,
             steps: total_steps,
             utc_offset_s,
