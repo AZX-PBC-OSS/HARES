@@ -131,9 +131,23 @@ impl PhaseClock {
         }
     }
 }
+
+#[cfg(feature = "profiling")]
+impl Default for PhaseClock {
+    /// The clock's default is its started state: the pipeline's
+    /// construction is the step's first `Instant::now()` reading, so the
+    /// derived pipeline default starts the clock.
+    fn default() -> Self {
+        Self::start()
+    }
+}
 /// The step's orchestration state: the phase clock and the per-step
 /// locals the legs hand forward, dropped with the step (an errored step
 /// drops the observer slot exactly as the monolithic step body did).
+/// The default is the step's construction: the clock starts (its
+/// `Default` is [`PhaseClock::start`]), the counters zero, the buffers
+/// empty, the interval unset until the environment leg reads it.
+#[derive(Default)]
 pub(super) struct StepPipeline {
     #[cfg(feature = "profiling")]
     phase_clock: PhaseClock,
@@ -172,48 +186,6 @@ pub(super) struct StepPipeline {
     /// The step's interval, read once in the environment leg and handed
     /// to the equipment steps and the solvers.
     dt: StdDuration,
-}
-
-impl Default for StepPipeline {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "profiling")]
-            phase_clock: PhaseClock::start(),
-            #[cfg(feature = "profiling")]
-            alloc_before: None,
-            #[cfg(debug_assertions)]
-            rng_consumed_this_step: false,
-            #[cfg(feature = "observe")]
-            obs_slot: None,
-            #[cfg(feature = "observe")]
-            obs_phases: PhaseSnapshots::default(),
-            #[cfg(feature = "observe")]
-            observing: false,
-            #[cfg(feature = "observe")]
-            dispatch_capture_buf: DispatchCapture::default(),
-            #[cfg(feature = "observe")]
-            scheduled_phases: Vec::new(),
-            #[cfg(feature = "observe")]
-            actor_skips: 0,
-            #[cfg(feature = "observe")]
-            actor_calls: 0,
-            #[cfg(feature = "observe")]
-            actor_error_count: 0,
-            #[cfg(feature = "observe")]
-            thermal_obs: Vec::new(),
-            #[cfg(feature = "observe")]
-            thermal_phase_ports: PortsCapture::default(),
-            #[cfg(feature = "observe")]
-            nonthermal_obs: Vec::new(),
-            #[cfg(feature = "observe")]
-            nonthermal_phase_ports: PortsCapture::default(),
-            #[cfg(feature = "observe")]
-            thermal_obs_used: 0,
-            #[cfg(feature = "observe")]
-            nonthermal_obs_used: 0,
-            dt: StdDuration::default(),
-        }
-    }
 }
 
 impl StepPipeline {
