@@ -345,3 +345,20 @@ def test_internal_gains_enter_at_the_air_node_with_no_radiant_surface_term(
         'self.sensible_gain_fraction = kwargs.get("Convective Gain Fraction (-)", 0) + kwargs.get('
         in equipment_source
     )
+
+
+@pytest.mark.ochre
+def test_comparison_limitations_declare_the_mismatches() -> None:
+    """The comparison's limitation metadata declares the diagnosed set."""
+    from ochre_bestest_600 import COMPARISON_LIMITATIONS
+
+    assert set(COMPARISON_LIMITATIONS) == {
+        "internal_gains_radiant_fraction",
+        "weather_alignment",
+        "calendar_year_label",
+        "warmup_treatment",
+        "ground_series",
+        "verdict",
+    }
+    assert "0% radiant" in COMPARISON_LIMITATIONS["internal_gains_radiant_fraction"]
+    assert "not an acceptance oracle" in COMPARISON_LIMITATIONS["verdict"]

@@ -18,6 +18,17 @@ same method OCHRE's own HVAC equipment uses -- to solve for the heat
 injection that maintains the zone temperature at the setpoint at each
 timestep.
 
+The comparison's scope is stated in ``COMPARISON_LIMITATIONS`` and returned
+with every metrics dict: OCHRE cannot represent the case's 60/40
+radiant/convective internal-gain split (the gains enter at the zone air
+node only), its weather alignment is OCHRE's own one-hour lag, its ground
+series is the DOE-2 GTEMP correlation, and its annual weather index cannot
+represent the fixture's leap-year start. The measured consequences and the
+verdict are recorded in
+``docs/ochre-bestest-600-comparison-diagnosis.md``: the runner is not an
+acceptance oracle for the Annex B8 bands, and the bands are not adjusted
+for it.
+
 Outputs:
   - Time-series CSV (``ochre_bestest_600_results.csv``): zone air
     temperature, heating load, cooling load, and outdoor temperature
@@ -105,7 +116,20 @@ FLOOR_TILT_DEG = 180.0  # inverted horizontal (interior above, ground below)
 
 # Simulation parameters (matching 600.toml)
 TIMESTEP_S = 3600
-WARMUP_HOURS = 24  # 1 day, the 600.toml [simulation] table's own warm-up
+# The warmup: the script's fixed 24 h stand-in for the fixture's "default
+# converging warm-up (the EnergyPlus criteria)". The diagnosis's one-factor
+# arms measure the stand-in: extending the warmup from 24 h to 168 h or 336
+# h moves the annual load by -0.02 kWh, so the state initialization is
+# converged; the consumed-from-the-year window is the treatment's real
+# consequence (see the warmup_treatment limitation below).
+WARMUP_HOURS = 24
+# The schedule's year label. The fixture's [simulation] table starts in leap
+# 2024; OCHRE's annual weather index cannot represent a leap year
+# (``set_annual_index`` raises "Cannot parse data for a leap year"), so the
+# script pins a non-leap label. The label only shifts the solar-position
+# season phase on the same 8760 TMY3 rows: one-factor arms at 2022 and 2021
+# move the annual heating load by +0.34 and +0.77 kWh against the 110 kWh
+# excess (docs/ochre-bestest-600-comparison-diagnosis.md).
 SIM_YEAR = 2023  # non-leap year for 365 days = 8760 hours
 
 # HVAC setpoints (matching 600.toml)
@@ -116,19 +140,27 @@ DEADBAND_C = 0.0  # 600.toml specifies deadband_c = 0.0
 # Infiltration (matching 600.toml)
 INFILTRATION_ACH = 0.5
 
-# Internal gains (matching 600.toml).  EnergyPlus BESTEST IDF OtherEquipment
-# Fraction Radiant = 0.3 (30% radiant, 70% convective).  Source: E+ I/O Reference
-# §Group-InternalGains, OtherEquipment object; E+ IDD V9-6-0-Energy+.idd N5 field.
-# This matches E+ v9.6 BESTEST test reference value.  ASHRAE 140-2017 Addendum a
-# §5.2.1.7 describes 60% radiant for occupants, not equipment; the 60% figure in
-# earlier script versions was a misattribution.
+# Internal gains (matching 600.toml): 200 W, 100% sensible. The case's
+# radiant split is the standard's own case input: ASHRAE 140-2017 Addendum
+# a Section 5.2.1.7 (carried by 140-2023 Section 7's fabric specification)
+# declares the 200 W load 60% radiative and 40% convective, and its
+# informative note names the load "equipment, lights, people, etc." -- the
+# adjudication is docs/PHYSICS_DECISIONS.md, "The BESTEST internal-gain
+# radiant fraction is the standard's case input", whose artifact record
+# (the BESTEST-GSR reference implementation's 200 W / Fraction Radiant 0.6
+# object) refutes this script's earlier claim that the 60% figure was a
+# misattribution of an E+ v9.6 IDF 0.3 value.
 #
-# OCHRE's model cannot inject radiant internal gains — it hardcodes Radiative Gain
-# Fraction = 0 (hpxml.py:1567) and combines convective+radiative into a single
-# sensible fraction (Equipment.py:80-84).  A FUTURE comment at Equipment.py:79-87
-# acknowledges this deficiency.  This script therefore runs OCHRE with OCHRE's
-# convention (0% radiant) to produce OCHRE-side reference data.  The discrepancy
-# is documented in review scr-03 Finding 3 and HARES ticket T-0352.
+# OCHRE cannot represent that split: its equipment model hardcodes
+# "Radiative Gain Fraction (-)": 0 (utils/hpxml.py:1567) and folds
+# convective plus radiative into one sensible fraction at the zone air node
+# (Equipment.py:80-87, with the FUTURE comment acknowledging the missing
+# radiation path), and the Envelope schedule path injects "Internal Gains
+# (W)" straight into ``zone.internal_sens_gain`` (Models/Envelope.py:1274),
+# which update_model adds at the air node with no surface term. The runner
+# therefore reports OCHRE's 0%-radiant representation of the case; the
+# limitation is declared in COMPARISON_LIMITATIONS below and disqualifies
+# this comparison as an acceptance oracle (the diagnosis report's verdict).
 INTERNAL_GAINS_W = 200.0
 
 # Surface optical properties (matching 600.toml)
@@ -150,6 +182,71 @@ ASHRAE_140_BANDS = {
     "annual_heating_load_kwh": (3993.0, 4504.0),
     "annual_cooling_load_kwh": (5432.0, 6162.0),
 }
+
+# What this comparison is, stated on the record. The runner is an
+# OCHRE-side reference construction, not an acceptance oracle for the
+# Annex B8 bands: the limitations below are OCHRE's own model and weather
+# semantics, and none of them is a licensed tolerance -- the band
+# assertions stay strict and the diagnosis report holds the measured
+# attribution. Each entry states the mismatch and its measured annual
+# leverage (the one-factor arms in
+# docs/ochre-bestest-600-comparison-diagnosis.md).
+COMPARISON_LIMITATIONS = {
+    "internal_gains_radiant_fraction": (
+        "The case's 60% radiative / 40% convective split (ASHRAE 140-2017 "
+        "Addendum a Section 5.2.1.7; docs/PHYSICS_DECISIONS.md) is not "
+        "representable in OCHRE: the gains enter at the zone air node only "
+        "(Radiative Gain Fraction hardcoded 0 in utils/hpxml.py:1567; the "
+        "Envelope schedule path folds everything into "
+        "zone.internal_sens_gain, Models/Envelope.py:1274). OCHRE runs the "
+        "case at 0% radiant. Unrepresentable rather than measured: no "
+        "OCHRE input can carry the split."
+    ),
+    "weather_alignment": (
+        "OCHRE's schedule path places EPW row n-1 at step n (row 0 doubled "
+        "at steps 0 and 1, the final row dropped): set_annual_index stamps "
+        "the hour-ending rows at :30 and resample_and_reindex bins them to "
+        "the next hour. The engine and the EPW convention read row n at "
+        "step n. One-factor arm (hour-beginning alignment): -0.43 kWh "
+        "heating, -19.15 kWh cooling."
+    ),
+    "calendar_year_label": (
+        "SIM_YEAR 2023 while the fixture starts in leap 2024: OCHRE's "
+        "annual weather index cannot represent a leap year (set_annual_index "
+        "raises), and the label only shifts the solar-position season phase "
+        "on the same TMY3 rows. One-factor arms (2022, 2021): +0.34 and "
+        "+0.77 kWh heating."
+    ),
+    "warmup_treatment": (
+        "A fixed 24 h warmup consumed from the year's head: the reported "
+        "window is 8736 h (Jan 2 through Dec 31), not the weather year's "
+        "8760 h. The fixture names the default converging warm-up. "
+        "One-factor arms (the warmup prepended, the full year reported): "
+        "+36.88 kWh heating; extending the prepended warmup from 24 h to "
+        "168 h and 336 h moves the annual load by -0.02 kWh, so the 24 h "
+        "state initialization is converged and the window is the whole "
+        "effect."
+    ),
+    "ground_series": (
+        "The floor's Ground zone follows OCHRE's DOE-2 GTEMP correlation "
+        "(the dry-bulb-derived sinusoid, damped to about 55% of the "
+        "monthly half-range and phase-lagged: measured mean 10.82 C, "
+        "4.62 to 17.10 C). The engine derives mean 10.875 C, amplitude "
+        "11.576 C, phase day 35. One-factor arm (the engine's series): "
+        "+15.71 kWh heating, +9.62 kWh cooling."
+    ),
+    "verdict": (
+        "No admissible input correction closes the 110 kWh heating excess "
+        "against the 4504 kWh band ceiling: the identified corrections "
+        "net +34.6 kWh (they worsen it). The residual is the comparator's "
+        "own model semantics -- the unrepresentable radiant split first of "
+        "all -- so this runner is not an acceptance oracle for the bands; "
+        "it is retained as a reference tool only, the strict band "
+        "assertions stay as written, and the bands are not adjusted. See "
+        "docs/ochre-bestest-600-comparison-diagnosis.md."
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Custom material CSV files for BESTEST 600 boundaries
@@ -509,6 +606,7 @@ def _compare_to_bands(df: pd.DataFrame) -> dict:
         "cooling_in_band": c_min <= cooling_kwh <= c_max,
         "heating_band": f"[{h_min}, {h_max}]",
         "cooling_band": f"[{c_min}, {c_max}]",
+        "comparison_limitations": dict(COMPARISON_LIMITATIONS),
     }
 
     return metrics
@@ -627,9 +725,12 @@ def run_bestest_600(output_dir: str | Path | None = None) -> dict:
         # import_weather uses start_time.year to set the EPW data year and
         # returns a DataFrame with a timezone-aware DatetimeIndex.
         # We start at Jan 1 of the simulation year.  The first WARMUP_HOURS
-        # timesteps serve as initialization (discarded from output).  For a
-        # lightweight building (time constant ~1 h), 24 h of warmup is more
-        # than sufficient per ASHRAE 140 Section 5.2.1.
+        # timesteps serve as initialization (discarded from output), so the
+        # reported window is 8736 h: Jan 2 00:00 through Dec 31 23:00.  The
+        # diagnosis's one-factor arms measure the treatment
+        # (docs/ochre-bestest-600-comparison-diagnosis.md): the state is
+        # converged by 24 h and the full-year window would add 36.9 kWh to
+        # the reported heating load.
         schedule, loc_for_envelope, sim_start, duration, time_res = (
             _build_schedule_for_year()
         )
@@ -669,6 +770,12 @@ def run_bestest_600(output_dir: str | Path | None = None) -> dict:
         f"  Annual cooling:   {metrics['annual_cooling_load_kwh']:.0f} kWh "
         f"(ASHRAE 140 band {metrics['cooling_band']}) "
         f"-> {'PASS' if metrics['cooling_in_band'] else 'FAIL'}"
+    )
+    print(
+        "  This comparison is not an acceptance oracle for the bands:"
+        " the internal-gain radiant split is unrepresentable in OCHRE"
+        " (0% radiant) and the other stated limitations are in the"
+        " metrics' comparison_limitations entry."
     )
     print(f"\n  Results CSV: {csv_path}")
 
