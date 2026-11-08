@@ -151,7 +151,6 @@ ASHRAE_140_BANDS = {
     "annual_cooling_load_kwh": (5432.0, 6162.0),
 }
 
-
 # ---------------------------------------------------------------------------
 # Custom material CSV files for BESTEST 600 boundaries
 # ---------------------------------------------------------------------------
@@ -369,7 +368,12 @@ def _build_boundaries() -> dict:
             "Exterior Solar Absorptivity (-)": SOLAR_ABSORPTANCE,
             "Exterior Emissivity (-)": EMITTANCE,
             "Interior Emissivity (-)": EMITTANCE,
-            "Boundary R Value": 25.254 + 1.5,  # floor uses film_r=1.5 in lookup
+            # The R here only picks the CSV's row when a boundary name has
+            # several types; OCHRE itself adds its film R to the CSV's
+            # assembly R, and "Floor" is not in OCHRE's 1.5 film list
+            # (utils/envelope.py get_boundary_rc_values), so the floor's
+            # lookup film is 0.9 like the walls' and roof's.
+            "Boundary R Value": 25.254 + 0.9,
         },
         "Window": {
             "Exterior Zone": "Outdoor",
@@ -515,6 +519,90 @@ def _compare_to_bands(df: pd.DataFrame) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _build_schedule_for_year() -> tuple[pd.DataFrame, dict, dt.datetime, dt.timedelta, dt.timedelta]:
+    """The runner's schedule construction: the weather year, the location's
+    film averages, the simulation start, the duration, and the time
+    resolution. One construction path for the runner and the preflight
+    witnesses.
+    """
+    start_time = dt.datetime(SIM_YEAR, 1, 1)
+    duration = dt.timedelta(hours=8760)  # 365 days
+    time_res = dt.timedelta(seconds=TIMESTEP_S)
+
+    weather_df, location = import_weather(
+        weather_file=EPW_PATH,
+        start_time=start_time,
+    )
+
+    # Adopt the weather timezone for the simulation start time,
+    # matching OCHRE's Dwelling.__init__ pattern (Dwelling.py:87).
+    weather_tz = cast(pd.DatetimeIndex, weather_df.index).tzinfo
+    sim_start = start_time.replace(tzinfo=weather_tz)
+
+    boundaries = _build_boundaries()
+
+    schedule = _build_schedule(
+        weather_df,
+        location,
+        boundaries,
+        start_time,  # naive -- resample_and_reindex strips tz
+        duration,
+        time_res,
+    )
+
+    # Build location dict for film resistances.
+    # import_weather already computed averages and added them to location.
+    loc_for_envelope = {
+        "Average Wind Speed (m/s)": location.get(
+            "Average Wind Speed (m/s)", 4.02
+        ),
+        "Average Ambient Temperature (C)": location.get(
+            "Average Ambient Temperature (C)", 10.0
+        ),
+        "Average Ground Temperature (C)": location.get(
+            "Average Ground Temperature (C)", 10.0
+        ),
+    }
+    return schedule, loc_for_envelope, sim_start, duration, time_res
+
+
+def _build_envelope(
+    schedule: pd.DataFrame,
+    loc_for_envelope: dict,
+    sim_start: dt.datetime,
+    duration: dt.timedelta,
+    time_res: dt.timedelta,
+    csv_dir: Path,
+) -> Envelope:
+    """The runner's Envelope construction with the full boundary pipeline."""
+    boundaries_csv, boundary_types_csv, materials_csv = _write_material_csvs(csv_dir)
+    return Envelope(
+        zones={
+            "Indoor": {
+                "Volume (m^3)": ZONE_VOLUME_M3,
+                "Infiltration Method": "ACH",
+                "Air Changes (1/hour)": INFILTRATION_ACH,
+            },
+        },
+        boundaries=_build_boundaries(),
+        location=loc_for_envelope,
+        external_radiation_method="full",
+        internal_radiation_method="full",
+        schedule=schedule,
+        initial_schedule=schedule.iloc[0].to_dict(),
+        initial_temp_setpoint=HEATING_SETPOINT_C,
+        start_time=sim_start,
+        duration=duration,
+        time_res=time_res,
+        verbosity=5,
+        save_results=False,
+        main_sim_name="",
+        boundaries_file=boundaries_csv,
+        boundary_types_file=boundary_types_csv,
+        materials_file=materials_csv,
+    )
+
+
 def run_bestest_600(output_dir: str | Path | None = None) -> dict:
     """Run the OCHRE BESTEST Case 600 simulation.
 
@@ -535,10 +623,6 @@ def run_bestest_600(output_dir: str | Path | None = None) -> dict:
 
     # Write custom material CSVs to a temp directory
     with tempfile.TemporaryDirectory() as tmpdir:
-        boundaries_csv, boundary_types_csv, materials_csv = (
-            _write_material_csvs(Path(tmpdir))
-        )
-
         # Load weather from the EPW file.
         # import_weather uses start_time.year to set the EPW data year and
         # returns a DataFrame with a timezone-aware DatetimeIndex.
@@ -546,72 +630,17 @@ def run_bestest_600(output_dir: str | Path | None = None) -> dict:
         # timesteps serve as initialization (discarded from output).  For a
         # lightweight building (time constant ~1 h), 24 h of warmup is more
         # than sufficient per ASHRAE 140 Section 5.2.1.
-        start_time = dt.datetime(SIM_YEAR, 1, 1)
-        duration = dt.timedelta(hours=8760)  # 365 days
-        time_res = dt.timedelta(seconds=TIMESTEP_S)
-
-        weather_df, location = import_weather(
-            weather_file=EPW_PATH,
-            start_time=start_time,
+        schedule, loc_for_envelope, sim_start, duration, time_res = (
+            _build_schedule_for_year()
         )
 
-        # Adopt the weather timezone for the simulation start time,
-        # matching OCHRE's Dwelling.__init__ pattern (Dwelling.py:87).
-        weather_tz = cast(pd.DatetimeIndex, weather_df.index).tzinfo
-        sim_start = start_time.replace(tzinfo=weather_tz)
-
-        # Build boundaries dict
-        boundaries = _build_boundaries()
-
-        # Build schedule (weather + solar + HVAC setpoints + internal gains)
-        schedule = _build_schedule(
-            weather_df,
-            location,
-            boundaries,
-            start_time,  # naive -- resample_and_reindex strips tz
+        envelope = _build_envelope(
+            schedule,
+            loc_for_envelope,
+            sim_start,
             duration,
             time_res,
-        )
-
-        # Build location dict for film resistances.
-        # import_weather already computed averages and added them to location.
-        loc_for_envelope = {
-            "Average Wind Speed (m/s)": location.get(
-                "Average Wind Speed (m/s)", 4.02
-            ),
-            "Average Ambient Temperature (C)": location.get(
-                "Average Ambient Temperature (C)", 10.0
-            ),
-            "Average Ground Temperature (C)": location.get(
-                "Average Ground Temperature (C)", 10.0
-            ),
-        }
-
-        # Create the Envelope with full boundary pipeline
-        envelope = Envelope(
-            zones={
-                "Indoor": {
-                    "Volume (m^3)": ZONE_VOLUME_M3,
-                    "Infiltration Method": "ACH",
-                    "Air Changes (1/hour)": INFILTRATION_ACH,
-                },
-            },
-            boundaries=boundaries,
-            location=loc_for_envelope,
-            external_radiation_method="full",
-            internal_radiation_method="full",
-            schedule=schedule,
-            initial_schedule=schedule.iloc[0].to_dict(),
-            initial_temp_setpoint=HEATING_SETPOINT_C,
-            start_time=sim_start,
-            duration=duration,
-            time_res=time_res,
-            verbosity=5,
-            save_results=False,
-            main_sim_name="",
-            boundaries_file=boundaries_csv,
-            boundary_types_file=boundary_types_csv,
-            materials_file=materials_csv,
+            Path(tmpdir),
         )
 
         # Run the simulation
