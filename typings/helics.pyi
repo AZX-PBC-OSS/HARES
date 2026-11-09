@@ -25,15 +25,6 @@ HELICS_PROPERTY_TIME_OFFSET: int
 HELICS_ERROR_INVALID_OBJECT: int
 
 
-class _Cli:
-    def run(self, config_path: str) -> None: ...
-
-
-# The helics 3.6.1 wheel does not expose ``cli`` at all (runners reach it on
-# builds that bundle the HELICS CLI); callers must go through ``getattr``.
-cli: _Cli | None
-
-
 class HelicsFederateInfo:
     # The 3.6.1 wheel requires the raw C handle, which only
     # ``helicsCreateFederateInfo()`` produces, and registers a finalizer for it.

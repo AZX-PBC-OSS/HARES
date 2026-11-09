@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import builtins
 import importlib
-import json
 import logging
 import os
 from pathlib import Path
@@ -44,22 +43,10 @@ class _NeverConnectedBroker(_FakeBroker):
         return False
 
 
-class _FakeCli:
-    def __init__(self) -> None:
-        self.calls: list[str] = []
-        self.loaded_configs: list[dict[str, Any]] = []
-
-    def run(self, config_path: str) -> None:
-        self.calls.append(config_path)
-        with Path(config_path).open("r", encoding="utf-8") as handle:
-            self.loaded_configs.append(json.load(handle))
-
-
 class _FakeHelicsModule:
     def __init__(self) -> None:
         self.created_brokers: list[_FakeBroker] = []
         self.unbindable_ports: set[int] = set()
-        self.cli = _FakeCli()
 
     def helicsCreateBroker(self, core_type: str, name: str, init_string: str) -> _FakeBroker:
         port = int(init_string.rpartition("--port=")[2])
@@ -106,21 +93,36 @@ def test_broker_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch) -> 
         importlib.import_module("hares.helics.broker")
 
 
-def test_runner_import_guard_without_helics(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_helics_modules()
-    monkeypatch.delitem(sys.modules, "helics", raising=False)
+def test_a_plain_helics_import_binds_no_cli_attribute() -> None:
+    """The wheel's own import surface: a plain ``import helics`` binds the
+    capi and the version metadata, never ``cli``. ``helics.cli`` exists only
+    after an explicit ``import helics.cli``. A launch path that probes
+    ``getattr(helics, "cli")`` after a plain import therefore cannot run on
+    a real wheel; the runner's config helpers build the JSON the external
+    ``helics`` CLI consumes instead."""
+    import helics
 
-    original_import = builtins.__import__
+    assert not hasattr(helics, "cli")
 
-    def _raising_import(name: str, *args: Any, **kwargs: Any):
-        if name == "helics":
-            raise ImportError("missing helics")
-        return original_import(name, *args, **kwargs)
 
-    monkeypatch.setattr(builtins, "__import__", _raising_import)
+def test_the_runner_module_imports_no_helics_and_exposes_no_launch_path() -> None:
+    """The runner module binds no wheel object and exports no launch path.
 
-    with pytest.raises(ImportError, match="HELICS not installed"):
-        importlib.import_module("hares.helics.runner")
+    The deleted launch path probed ``getattr(helics, "cli")`` after a plain
+    import; the wheel never binds ``cli`` there, so the path raised on every
+    real wheel and passed only under a fake that pre-attached it. The module
+    builds runner JSON for the external ``helics`` CLI: it imports nothing
+    from the wheel, and the package's import guard lives in ``broker.py``,
+    the first module the package imports.
+    """
+    runner_module = importlib.import_module("hares.helics.runner")
+
+    assert not hasattr(runner_module, "run_cosimulation")
+    assert not hasattr(runner_module, "helics")
+
+    import hares.helics
+
+    assert not hasattr(hares.helics, "run_cosimulation")
 
 
 def test_create_broker_wait_and_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,55 +348,6 @@ def test_generate_cosim_config_broker_false(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert config["broker"] is False
-
-
-def test_run_cosimulation_dict_writes_temp_json(monkeypatch: pytest.MonkeyPatch) -> None:
-    _, runner_module, fake_helics = _import_broker_runner_modules(monkeypatch)
-
-    config = {
-        "name": "hares-cosim",
-        "broker": True,
-        "federates": [{"name": "gridlabd", "host": "localhost", "directory": ".", "exec": "gridlabd feeder.glm"}],
-    }
-
-    runner_module.run_cosimulation(config)
-
-    assert len(fake_helics.cli.calls) == 1
-    temp_path = Path(fake_helics.cli.calls[0])
-    assert temp_path.exists() is False
-    assert fake_helics.cli.loaded_configs[0]["name"] == "hares-cosim"
-
-
-def test_run_cosimulation_path_passthrough(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _, runner_module, fake_helics = _import_broker_runner_modules(monkeypatch)
-    path = tmp_path / "cosim.json"
-    path.write_text(json.dumps({"name": "existing", "broker": False, "federates": []}), encoding="utf-8")
-
-    runner_module.run_cosimulation(path)
-
-    assert fake_helics.cli.calls == [str(path)]
-
-
-def test_run_cosimulation_cleans_temp_file_on_json_dump_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _, runner_module, _ = _import_broker_runner_modules(monkeypatch)
-    leaked: list[Path] = []
-    original_mkstemp = runner_module.tempfile.mkstemp
-
-    def _tracking_mkstemp(*args: Any, **kwargs: Any) -> tuple[int, str]:
-        fd, path = original_mkstemp(*args, **kwargs)
-        leaked.append(Path(path))
-        return fd, path
-
-    monkeypatch.setattr(runner_module.tempfile, "mkstemp", _tracking_mkstemp)
-    monkeypatch.setattr(runner_module.json, "dump", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
-
-    with pytest.raises(OSError, match="disk full"):
-        runner_module.run_cosimulation({"name": "x", "broker": True, "federates": []})
-
-    assert leaked, "test should capture temp file path"
-    assert all(path.exists() is False for path in leaked)
 
 
 def test_make_dwelling_federate_config(monkeypatch: pytest.MonkeyPatch) -> None:

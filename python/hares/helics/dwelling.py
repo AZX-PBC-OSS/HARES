@@ -352,6 +352,18 @@ def handle_time_grant(requested: float, granted: float) -> bool:
     has been terminated). It is recognised as an expected, handled condition —
     not an invariant violation.
 
+    The sentinel is sound only because every request is horizon-bounded or
+    exactly the sentinel itself: the stepping loops request a step's exit
+    time (the run's horizon bounds those at seconds to days), and the only
+    request above the horizon is the completion handshake's
+    ``HELICS_TIME_MAXTIME``. HELICS 3.7.0 clamps every grant at or above
+    its termination-time threshold (``HELICS_TIME_MAXTIME / 2``) up to
+    ``HELICS_TIME_MAXTIME`` on the C return path, so a bare large request
+    inside that clamping window would have a legitimate grant returned as
+    the sentinel and read here as a federation termination. A bare large
+    time is never requested: a request is a step's exit time or exactly
+    ``HELICS_TIME_MAXTIME``.
+
     ``granted > requested`` with a non-sentinel value is a HELICS invariant
     violation that the HELICS runtime should prevent — if it occurs, step
     anyway and log a warning.
@@ -714,6 +726,11 @@ class HELICSDwelling:
                 while not handle_time_grant(exit_time_s, granted):
                     self._publish_results()
                     granted = self._request_time(exit_time_s)
+                # The sentinel is sound because every request above is a
+                # horizon-bounded exit time: HELICS 3.7.0 clamps grants at
+                # or above HELICS_TIME_MAXTIME / 2 up to
+                # HELICS_TIME_MAXTIME, so a bare large request would land
+                # here disguised as a federation termination.
                 if granted >= helics.HELICS_TIME_MAXTIME:
                     self._federation_terminated = True
                     break

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import datetime
 import importlib
+import logging
 from types import ModuleType, SimpleNamespace
 import builtins
 import json
@@ -623,6 +624,30 @@ def test_helics_dwelling_handle_time_grant_helper(
     assert fn(60.0, 30.0) is False
     assert fn(60.0, 90.0) is True
     assert fn(60.0, fake_helics.HELICS_TIME_MAXTIME) is True
+
+
+def test_handle_time_grant_steps_a_clamping_window_grant_without_reading_termination(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The termination sentinel is exactly ``HELICS_TIME_MAXTIME``, never the
+    window below it. HELICS 3.7.0 clamps grants at or above
+    ``HELICS_TIME_MAXTIME / 2`` up to ``HELICS_TIME_MAXTIME`` on the C return
+    path; on an unclamped library (the installed wheel) a legitimate grant
+    inside that clamping window reaches the helper unchanged, and the helper
+    steps on it like any other grant. A window grant must never read as a
+    federation termination: only the sentinel value itself does."""
+    module, fake_helics = _import_dwelling_module(monkeypatch)
+    fn = module.handle_time_grant
+
+    window_floor = fake_helics.HELICS_TIME_MAXTIME / 2
+    with caplog.at_level(logging.WARNING, logger="hares.helics.dwelling"):
+        assert fn(window_floor, window_floor) is True
+    assert "terminated" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="hares.helics.dwelling"):
+        assert fn(window_floor, fake_helics.HELICS_TIME_MAXTIME) is True
+    assert "terminated prematurely" in caplog.text
 
 
 def test_helics_dwelling_multi_rate_grants_only_steps_at_requested_time(
